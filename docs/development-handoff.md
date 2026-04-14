@@ -89,13 +89,13 @@ This was achieved by replacing the active DTB used by the booted system and
 rebooting. That validates a very useful rapid inner loop for future board DTS
 work.
 
-### 5. The eMMC flashing path works, but the latest full image exposed a missing-initrd bug
+### 5. The eMMC flashing path is now validated end to end
 
 Confirmed:
 
 - the host can reach the board in `FDL` / ROM download mode
 - the fastboot-based eMMC flashing sequence completes
-- the board accepts the flashed boot artifacts and attempts to boot
+- the board accepts the flashed boot artifacts and boots to userspace login
 
 Observed on the first full eMMC boot attempt:
 
@@ -116,6 +116,35 @@ Repo-level mitigation now added:
 - the build refuses to package `bootfs` if no `initrd.img-*` is present
 - a host-side repair helper can regenerate the initrd and rebuild only
   `bootfs.ext4`
+
+Revalidation after those fixes succeeded:
+
+- the eMMC image booted to a serial login prompt
+- login as `eaie` succeeded
+- the machine model remained stock: `spacemit k1-x deb1 board`
+- the hostname remained stock: `host1`
+- time to first visible login prompt was about 189 seconds, so the system is
+  functional but not yet optimized for boot time
+
+Additional practical lesson from the current Ubuntu 22.04 host:
+
+- distro `fastboot 28.0.2-debian` detected the board but hung on
+  `fastboot stage factory/FSBL.bin`
+- the validated working client was Google Android platform-tools `fastboot`
+- `scripts/eaie_flash.sh` therefore supports `FASTBOOT_BIN=/path/to/fastboot`
+
+Residual warnings in the captured first full eMMC boot log were non-fatal:
+
+- HDMI and DRM reported no connected display, which is expected for headless
+  serial testing
+- the kernel is still a debug build and prints the `trace_printk()` warning
+- `jitterentropy` reported a compliance failure, but the hardware RNG still
+  registered and the system reached userspace normally
+- both PCIe controllers reported `Phy link never came up`, which is acceptable
+  if no endpoint is attached during bring-up
+- there is still background noise worth tracking later:
+  `db_root: cannot open: /etc/target`, executable permission bits on several
+  unit files, and Bluetooth out-of-order packets around the login prompt
 
 ## Upstream References Used
 
@@ -380,16 +409,18 @@ The repo now includes a first-boot rootfs expansion path using:
 This design is sound for the target layout, but it still needs validation with
 a newly generated image from the scripted flow.
 
-### 3. The eMMC path still needs one clean end-to-end revalidation
+### 3. The eMMC path is validated, but host flashing tooling still matters
 
-The repository now contains both:
+The repository now contains:
 
 - the full fastboot flasher
 - the bootfs-only missing-initrd recovery helper
 
-But the repaired eMMC image has not yet been revalidated to a full successful
-userspace boot in the captured notes. That should be one of the first checks on
-the next machine.
+The repaired eMMC image has now been revalidated to a full successful userspace
+boot. The remaining caveat is host-side tool selection:
+
+- old distro `fastboot` builds may hang during `stage`
+- the current known-good fallback is Google Android platform-tools `fastboot`
 
 ### 4. The SSH defaults are intentionally insecure
 
@@ -472,6 +503,9 @@ Boot the newly scripted image and confirm:
 - initrd presence in `bootfs`
 - successful eMMC boot
 
+This check is now satisfied once on the current machine, so the next machine
+should primarily confirm reproducibility rather than basic feasibility.
+
 ### Third priority
 
 Verify board-level development loops:
@@ -499,9 +533,10 @@ driver/module/config work.
 2. Review `docs/bianbu-build-automation.md`.
 3. Run `bash scripts/build-bianbu.sh --clean`.
 4. If the build fails, capture the exact failing package or stage.
-5. If it succeeds, flash and boot the generated SD image.
-6. Validate GUI, SSH, and rootfs expansion.
-7. Only after that, move on to real kernel-source integration.
+5. If it succeeds, flash and boot the generated eMMC image.
+6. Validate serial login, GUI, SSH, and rootfs expansion.
+7. Record whether the machine still requires platform-tools `fastboot`.
+8. Only after that, move on to DT and kernel-source integration.
 
 ## Final State At End Of This Cycle
 
@@ -513,5 +548,6 @@ At the end of this cycle, the important technical position is:
 - SSH enablement folded into automation
 - boot-logo testing path understood
 - DTB redeploy validated on hardware
+- eMMC flash plus first full boot validated on hardware
 
 That is a strong baseline for the next iteration.

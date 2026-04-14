@@ -11,7 +11,7 @@ The current state proves all of the following:
 
 - a Bianbu Ubuntu-based LXQt image can be generated in this workspace
 - the SD card image and Titan flash zip can both be generated
-- the eMMC fastboot flashing path is implemented and reaches the board
+- the eMMC fastboot flashing path is validated through a full boot to login
 - the booted image can be customized in userspace without rebuilding from
   scratch for every small test
 - the display stack issue was traced to a missing Qt6 Wayland runtime plugin
@@ -93,8 +93,8 @@ This gives us a fast DTS-only deployment loop over SSH for future board work.
 ### 6. eMMC flashing and missing-initrd recovery
 
 We added a host-side fastboot flasher for the BPI-F3 eMMC path and validated
-that it can drive the board through ROM download mode and complete the staged
-flash sequence.
+that it can drive the board through ROM download mode, complete the staged
+flash sequence, and boot the resulting eMMC image to a login prompt.
 
 During the first full eMMC boot attempt, the image exposed a separate bug:
 
@@ -112,6 +112,22 @@ Mitigations now captured in the repo:
   `bootfs.ext4`
 - the flasher now treats unsupported `fastboot reboot` as a board quirk and
   falls back to manual reset instead of reporting a false flash failure
+
+There was also a host-side tooling issue on the current Ubuntu 22.04 machine:
+
+- distro `fastboot 28.0.2-debian` detected the board but hung on
+  `fastboot stage factory/FSBL.bin`
+- the validated working client was Google Android platform-tools `fastboot`
+- `scripts/eaie_flash.sh` now accepts `FASTBOOT_BIN=/path/to/fastboot`
+
+Validated first eMMC-boot baseline:
+
+- machine model remained stock: `spacemit k1-x deb1 board`
+- hostname remained stock: `host1`
+- login prompt appeared on serial at about 189 seconds
+- login as `eaie` succeeded
+
+That is the clean pre-device-tree baseline for future board customization.
 
 ## Reusable Files Now In This Repo
 
