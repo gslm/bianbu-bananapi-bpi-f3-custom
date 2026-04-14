@@ -145,7 +145,11 @@ ensure_apt_packages() {
 install_host_prereqs() {
     log_info "Checking host prerequisites"
 
-    ensure_apt_packages ca-certificates curl docker.io qemu-user-static
+    ensure_apt_packages ca-certificates curl qemu-user-static
+
+    if ! command -v docker >/dev/null 2>&1; then
+        ensure_apt_packages docker.io
+    fi
 
     if ! command -v sha256sum >/dev/null 2>&1; then
         die "sha256sum is required but was not found on the host."
@@ -159,7 +163,10 @@ install_host_prereqs() {
         die "dpkg is required on the host."
     fi
 
-    run_sudo systemctl enable --now docker >/dev/null 2>&1 || true
+    if ! docker info >/dev/null 2>&1 && ! sudo docker info >/dev/null 2>&1; then
+        run_sudo systemctl enable --now docker >/dev/null 2>&1 || true
+    fi
+
     ensure_docker_access
     log_ok "Host prerequisites look usable"
 }

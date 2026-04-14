@@ -100,6 +100,10 @@ For eMMC flashing after the build, see:
 - The host-side script now prefers the system `qemu-user-static` if it passes
   the SpacemiT `rvv` check. It falls back to the older pinned SpacemiT package
   only if the host runtime does not work.
+- The current Ubuntu 22.04 development machine required Google Android
+  platform-tools `fastboot` for eMMC flashing because distro
+  `fastboot 28.0.2-debian` hung on `fastboot stage factory/FSBL.bin`.
+  `scripts/eaie_flash.sh` supports `FASTBOOT_BIN=/path/to/fastboot` for this.
 - The automation no longer assumes the container build can always finish the
   desktop stack cleanly. It can package a provisional image that repairs itself
   natively on first boot.

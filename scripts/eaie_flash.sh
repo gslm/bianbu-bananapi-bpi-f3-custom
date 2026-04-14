@@ -4,13 +4,8 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACK_DIR="$ROOT_DIR/pack_dir"
-STATE_DIR="$ROOT_DIR/.bianbu-build"
-FLASH_LOG_DIR="$STATE_DIR/flash-logs"
+FASTBOOT_BIN="${FASTBOOT_BIN:-fastboot}"
 
-SERIAL_PORT=""
-SERIAL_BAUD="115200"
-SERIAL_LOG=""
-SERIAL_PID=""
 WAIT_TIMEOUT=30
 BOOTFS_ONLY=0
 MANUAL_RESET_REQUIRED=0
@@ -27,7 +22,7 @@ COLOR_MAGENTA=$'\033[1;35m'
 
 usage() {
     cat <<'EOF'
-Usage: sudo scripts/eaie_flash.sh [--port /dev/ttyUSB0] [--baud 115200] [--bootfs-only] [--help]
+Usage: sudo scripts/eaie_flash.sh [--bootfs-only] [--help]
 
 Flash the generated Bianbu image package to BPI-F3 eMMC using fastboot.
 
@@ -35,16 +30,16 @@ The script:
 1. Validates the generated pack_dir contents.
 2. Installs the BPI-F3 DFU udev rule.
 3. Reminds the user to hold FDL before inserting the USB-C cable.
-4. Optionally captures the serial console using picocom.
-5. Waits for fastboot DFU detection.
-6. Runs the staged fastboot flashing sequence for eMMC.
+4. Waits for fastboot DFU detection.
+5. Runs the staged fastboot flashing sequence for eMMC.
 
 Options:
-  --port <device>   Optional UART device to log with picocom, e.g. /dev/ttyUSB0
-  --baud <rate>     UART baud rate. Defaults to 115200.
   --bootfs-only     Reflash only the bootfs partition. Useful after regenerating
                     initrd and bootfs.ext4 without changing rootfs.
   --help            Show this help text.
+
+Environment:
+  FASTBOOT_BIN      Override the fastboot binary to use.
 EOF
 }
 
@@ -81,30 +76,11 @@ run_as_root() {
     fi
 }
 
-cleanup() {
-    if [[ -n "$SERIAL_PID" ]]; then
-        kill "$SERIAL_PID" >/dev/null 2>&1 || true
-        wait "$SERIAL_PID" 2>/dev/null || true
-    fi
-}
-
-trap cleanup EXIT
-
 cd "$PACK_DIR"
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port)
-                [[ $# -ge 2 ]] || die "--port requires a value"
-                SERIAL_PORT="$2"
-                shift
-                ;;
-            --baud)
-                [[ $# -ge 2 ]] || die "--baud requires a value"
-                SERIAL_BAUD="$2"
-                shift
-                ;;
             --bootfs-only)
                 BOOTFS_ONLY=1
                 ;;
@@ -124,9 +100,10 @@ require_tools() {
     local missing=()
     local tool
 
-    for tool in fastboot awk sed grep stty cat; do
+    for tool in awk sed grep; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
     done
+    command -v "$FASTBOOT_BIN" >/dev/null 2>&1 || missing+=("$FASTBOOT_BIN")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         die "Missing required host tools: ${missing[*]}"
@@ -161,8 +138,6 @@ validate_pack_dir() {
 install_udev_rule() {
     log_info "Installing the BPI-F3 DFU udev rule"
 
-    mkdir -p "$FLASH_LOG_DIR"
-
     if [[ -f "$UDEV_RULE_PATH" ]] && grep -Fxq "$UDEV_RULE_CONTENT" "$UDEV_RULE_PATH"; then
         log_ok "The DFU udev rule is already installed"
     else
@@ -181,49 +156,24 @@ prompt_fdl() {
     printf '  1. Disconnect the board USB-C cable.\n'
     printf '  2. Hold the FDL button (SW2).\n'
     printf '  3. While holding FDL, insert the USB-C cable.\n'
-    printf '  4. Keep serial attached if you want to watch the boot ROM log.\n'
+    printf '  4. If desired, watch the UART in a separate terminal.\n'
     printf '\n'
     read -r -p "Press Enter after you are holding FDL and have inserted the USB-C cable..."
 }
 
-start_serial_capture() {
-    [[ -n "$SERIAL_PORT" ]] || return 0
-
-    [[ -e "$SERIAL_PORT" ]] || die "Serial port does not exist: $SERIAL_PORT"
-
-    mkdir -p "$FLASH_LOG_DIR"
-    SERIAL_LOG="$FLASH_LOG_DIR/serial-$(date +%Y%m%d-%H%M%S).log"
-
-    log_info "Starting serial capture on $SERIAL_PORT at ${SERIAL_BAUD} baud"
-    run_as_root stty -F "$SERIAL_PORT" "$SERIAL_BAUD" raw -echo -ixon -ixoff -crtscts cs8 -cstopb -parenb
-    run_as_root bash -c "cat '$SERIAL_PORT' >> '$SERIAL_LOG'" &
-    SERIAL_PID="$!"
-    sleep 2
-
-    if ! kill -0 "$SERIAL_PID" >/dev/null 2>&1; then
-        die "Serial capture exited immediately; the UART port could not be monitored."
-    fi
-
-    log_ok "Serial capture started; log file: $SERIAL_LOG"
-}
-
-serial_log_contains_controller_run() {
-    [[ -n "$SERIAL_LOG" && -f "$SERIAL_LOG" ]] || return 1
-    grep -q "Controller Run" "$SERIAL_LOG"
-}
-
 fastboot_wait_for_device() {
-    local started elapsed output serial_hint_shown
+    local started elapsed output
     started="$(date +%s)"
-    serial_hint_shown=0
 
-    log_step "Waiting for the board to appear in fastboot DFU mode"
+    log_step "Waiting for the board to appear in fastboot DFU mode via $FASTBOOT_BIN"
     while true; do
-        output="$(run_as_root fastboot devices 2>&1 || true)"
-        if grep -Eq "DFU download|Android Fastboot" <<<"$output"; then
+        output="$(run_as_root "$FASTBOOT_BIN" devices 2>&1 || true)"
+        if grep -Eiq '(^[^[:space:]]+[[:space:]]+fastboot([[:space:]]|$))|(DFU download)|(Android Fastboot)' <<<"$output"; then
             printf '%s\n' "$output"
             if grep -q "DFU download" <<<"$output"; then
                 log_ok "fastboot detected the board in ROM DFU mode"
+            elif grep -Eiq '^[^[:space:]]+[[:space:]]+fastboot([[:space:]]|$)' <<<"$output"; then
+                log_ok "fastboot detected the board and reported a ready fastboot device"
             else
                 log_ok "fastboot detected the board in Android Fastboot mode"
             fi
@@ -236,31 +186,26 @@ fastboot_wait_for_device() {
             die "Timed out waiting for the board in fastboot DFU mode."
         fi
 
-        if [[ -n "$SERIAL_LOG" && "$serial_hint_shown" -eq 0 ]] && serial_log_contains_controller_run; then
-            log_ok "Serial log shows 'Controller Run'; the board is in ROM download mode."
-            serial_hint_shown=1
-        fi
-
         sleep 1
     done
 }
 
 run_fastboot() {
-    log_step "Running: fastboot $*"
-    run_as_root fastboot "$@"
+    log_step "Running: $FASTBOOT_BIN $*"
+    run_as_root "$FASTBOOT_BIN" "$@"
 }
 
 request_boot_after_flash() {
     log_step "Requesting the board to leave fastboot mode"
 
-    if run_as_root fastboot reboot; then
+    if run_as_root "$FASTBOOT_BIN" reboot; then
         log_ok "The board accepted fastboot reboot"
         return 0
     fi
 
     log_warn "fastboot reboot is not supported by the current bootloader. Trying fastboot continue instead."
 
-    if run_as_root fastboot continue; then
+    if run_as_root "$FASTBOOT_BIN" continue; then
         log_ok "The board accepted fastboot continue"
         return 0
     fi
@@ -312,9 +257,6 @@ print_summary() {
     printf '\n'
     log_ok "Flash sequence finished"
     printf '  pack_dir: %s\n' "$PACK_DIR"
-    if [[ -n "$SERIAL_LOG" ]]; then
-        printf '  serial log: %s\n' "$SERIAL_LOG"
-    fi
     printf '\n'
     if [[ "$BOOTFS_ONLY" -eq 1 ]]; then
         printf 'Only the bootfs partition was reflashed.\n'
@@ -331,7 +273,6 @@ main() {
     require_tools
     validate_pack_dir
     install_udev_rule
-    start_serial_capture
     prompt_fdl
     fastboot_wait_for_device
     flash_emmc

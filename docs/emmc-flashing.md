@@ -16,9 +16,18 @@ It automates:
 
 - installation of the BPI-F3 DFU udev rule
 - udev reload
-- optional serial capture to a logfile
 - detection of the board in DFU download mode
 - the staged `fastboot` flashing sequence for eMMC
+
+Important host note:
+
+- on the current Ubuntu 22.04 development machine, Debian/Ubuntu
+  `fastboot 28.0.2-debian` reached device detection but hung on
+  `fastboot stage factory/FSBL.bin`
+- the validated working client was the current Google Android platform-tools
+  `fastboot`
+- `scripts/eaie_flash.sh` supports `FASTBOOT_BIN=/path/to/fastboot` for this
+  reason
 
 ## Usage
 
@@ -28,10 +37,16 @@ Run from the repository root:
 sudo bash scripts/eaie_flash.sh
 ```
 
-With serial capture:
+Recommended on hosts where the distro `fastboot` hangs during `stage`:
 
 ```bash
-sudo bash scripts/eaie_flash.sh --port /dev/ttyUSB0
+sudo env FASTBOOT_BIN="$HOME/platform-tools/fastboot" bash scripts/eaie_flash.sh
+```
+
+If you want UART output while flashing, run serial in a separate terminal:
+
+```bash
+sudo picocom -b 115200 /dev/ttyUSB1
 ```
 
 Bootfs-only recovery:
@@ -39,9 +54,6 @@ Bootfs-only recovery:
 ```bash
 sudo bash scripts/eaie_flash.sh --bootfs-only
 ```
-
-The script assumes the serial console runs at `115200` baud unless another rate
-is passed with `--baud`.
 
 ## Manual Step
 
@@ -54,16 +66,13 @@ cannot be automated:
 
 After that, the script waits for:
 
-- `fastboot devices` to show `DFU download`
+- `fastboot devices` to show a ready fastboot device, for example
+  `dfu-device fastboot`
 
-If serial logging is enabled, the script configures the UART and records the ROM
-console to a log file under `.bianbu-build/flash-logs/`.
-
-For manual interactive serial access outside the script, `picocom` still works,
-for example:
+For manual interactive serial access during flashing, use `picocom`, for example:
 
 ```bash
-sudo picocom -b 115200 /dev/ttyUSB0
+sudo picocom -b 115200 /dev/ttyUSB1
 ```
 
 ## What Gets Flashed
@@ -112,3 +121,26 @@ This helper:
 - rebuilds `bootfs.ext4`
 - preserves the existing bootfs filesystem UUID so `/etc/fstab` in the flashed
   rootfs remains valid
+
+## Validated Baseline
+
+On April 14, 2026, the repo completed a full eMMC flash and first boot to a
+serial login prompt using:
+
+- `scripts/eaie_flash.sh`
+- Google Android platform-tools `fastboot`
+- separate UART monitoring through `picocom`
+
+The resulting baseline is intentionally still stock:
+
+- U-Boot product profile: `k1-x_deb1`
+- kernel machine model: `spacemit k1-x deb1 board`
+- hostname at boot: `host1`
+- successful login as `eaie`
+
+The captured first full boot log is:
+
+- [0001-first-full-boot.log](../scripts/image-logs/0001-first-full-boot.log)
+
+This is the baseline to preserve before beginning DT and board-identity
+customization.
