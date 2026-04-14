@@ -11,6 +11,7 @@ The current state proves all of the following:
 
 - a Bianbu Ubuntu-based LXQt image can be generated in this workspace
 - the SD card image and Titan flash zip can both be generated
+- the eMMC fastboot flashing path is implemented and reaches the board
 - the booted image can be customized in userspace without rebuilding from
   scratch for every small test
 - the display stack issue was traced to a missing Qt6 Wayland runtime plugin
@@ -89,6 +90,29 @@ Patched files in the build workspace:
 
 This gives us a fast DTS-only deployment loop over SSH for future board work.
 
+### 6. eMMC flashing and missing-initrd recovery
+
+We added a host-side fastboot flasher for the BPI-F3 eMMC path and validated
+that it can drive the board through ROM download mode and complete the staged
+flash sequence.
+
+During the first full eMMC boot attempt, the image exposed a separate bug:
+
+- `bootfs` was missing `initrd.img-6.6.63`
+- U-Boot fell back to a built-in ramdisk
+- the kernel then failed to load `esos.elf`
+- the board stalled early in the `spacemit-rproc` path
+
+Mitigations now captured in the repo:
+
+- the build automation explicitly generates `initrd.img-*` before packaging
+  `bootfs.ext4`
+- the build refuses to package `bootfs` if no initrd is present
+- a dedicated recovery helper can regenerate the initrd and rebuild only
+  `bootfs.ext4`
+- the flasher now treats unsupported `fastboot reboot` as a board quirk and
+  falls back to manual reset instead of reporting a false flash failure
+
 ## Reusable Files Now In This Repo
 
 These are the main source artifacts now present in the Git repo.
@@ -97,6 +121,8 @@ These are the main source artifacts now present in the Git repo.
 
 - [scripts/build-bianbu.sh](../scripts/build-bianbu.sh)
 - [scripts/build-rootfs-in-container.sh](../scripts/build-rootfs-in-container.sh)
+- [scripts/eaie_flash.sh](../scripts/eaie_flash.sh)
+- [scripts/repair-bootfs-initrd.sh](../scripts/repair-bootfs-initrd.sh)
 - [scripts/patch-dtb-model.sh](../scripts/patch-dtb-model.sh)
 
 ### Script assets
@@ -104,11 +130,15 @@ These are the main source artifacts now present in the Git repo.
 - [scripts/assets/expand-rootfs.sh](../scripts/assets/expand-rootfs.sh)
 - [scripts/assets/expand-rootfs.service](../scripts/assets/expand-rootfs.service)
 - [scripts/assets/ssh-hostkeys.service](../scripts/assets/ssh-hostkeys.service)
+- [scripts/assets/firstboot-repair.sh](../scripts/assets/firstboot-repair.sh)
+- [scripts/assets/firstboot-repair.service](../scripts/assets/firstboot-repair.service)
 
 ### Documentation
 
 - [docs/bianbu-image-update-instructions.md](./bianbu-image-update-instructions.md)
 - [docs/bianbu-build-automation.md](./bianbu-build-automation.md)
+- [docs/emmc-flashing.md](./emmc-flashing.md)
+- [docs/development-handoff.md](./development-handoff.md)
 - [docs/repo-handoff.md](./repo-handoff.md)
 
 ### Repo test asset
@@ -150,6 +180,8 @@ want to vendor large binaries into version control.
 - `.bianbu-build/`
 - `0001-first-boot.log`
 - `0002-hdmi.log`
+- `0003-first-clean-run.log`
+- `0004-kernel-boot-error.log`
 - `eaie.bmp`
 - `eaie-256.bmp`
 - `eaie-256-ffmpeg.bmp`

@@ -1,0 +1,14 @@
+[Unit]
+Description=EAIE First-Boot Native Package Repair
+After=network.target
+Wants=network.target
+ConditionPathExists=/var/lib/eaie-firstboot-repair/enabled
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/eaie-firstboot-repair.sh
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

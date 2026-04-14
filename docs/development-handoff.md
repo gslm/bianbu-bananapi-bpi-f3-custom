@@ -89,6 +89,34 @@ This was achieved by replacing the active DTB used by the booted system and
 rebooting. That validates a very useful rapid inner loop for future board DTS
 work.
 
+### 5. The eMMC flashing path works, but the latest full image exposed a missing-initrd bug
+
+Confirmed:
+
+- the host can reach the board in `FDL` / ROM download mode
+- the fastboot-based eMMC flashing sequence completes
+- the board accepts the flashed boot artifacts and attempts to boot
+
+Observed on the first full eMMC boot attempt:
+
+- U-Boot failed to load `initrd.img-6.6.63` from `bootfs`
+- the kernel then failed to load `esos.elf`
+- the failure cascaded into `spacemit-rproc` cleanup problems and a boot stall
+
+Practical conclusion:
+
+- the image flashing path itself is valid
+- the bad artifact was specifically the packaged `bootfs`
+- this was not a GPT, partition, or `rootfs` flashing failure
+
+Repo-level mitigation now added:
+
+- the container build script explicitly generates `initrd.img-*` before
+  packaging `bootfs.ext4`
+- the build refuses to package `bootfs` if no `initrd.img-*` is present
+- a host-side repair helper can regenerate the initrd and rebuild only
+  `bootfs.ext4`
+
 ## Upstream References Used
 
 These were the primary references for the work captured in this repo.
@@ -198,6 +226,8 @@ exposed deployment.
 
 - [scripts/build-bianbu.sh](../scripts/build-bianbu.sh)
 - [scripts/build-rootfs-in-container.sh](../scripts/build-rootfs-in-container.sh)
+- [scripts/eaie_flash.sh](../scripts/eaie_flash.sh)
+- [scripts/repair-bootfs-initrd.sh](../scripts/repair-bootfs-initrd.sh)
 - [scripts/patch-dtb-model.sh](../scripts/patch-dtb-model.sh)
 
 ### Supporting systemd/service assets
@@ -205,11 +235,14 @@ exposed deployment.
 - [scripts/assets/expand-rootfs.sh](../scripts/assets/expand-rootfs.sh)
 - [scripts/assets/expand-rootfs.service](../scripts/assets/expand-rootfs.service)
 - [scripts/assets/ssh-hostkeys.service](../scripts/assets/ssh-hostkeys.service)
+- [scripts/assets/firstboot-repair.sh](../scripts/assets/firstboot-repair.sh)
+- [scripts/assets/firstboot-repair.service](../scripts/assets/firstboot-repair.service)
 
 ### Documentation
 
 - [docs/bianbu-build-automation.md](./bianbu-build-automation.md)
 - [docs/bianbu-image-update-instructions.md](./bianbu-image-update-instructions.md)
+- [docs/emmc-flashing.md](./emmc-flashing.md)
 - [docs/repo-handoff.md](./repo-handoff.md)
 - [docs/development-handoff.md](./development-handoff.md)
 
@@ -222,7 +255,9 @@ exposed deployment.
 - checking/installing host prerequisites
 - pulling the pinned Docker builder image
 - downloading pinned upstream inputs
-- installing the pinned host `qemu-user-static`
+- preferring the host `qemu-user-static` if it passes the `rvv` check
+- falling back to the older pinned SpacemiT `qemu-user-static` only if the host
+  runtime does not pass that check
 - creating or reusing the privileged build container
 - running the in-container rootfs and image build
 
@@ -250,11 +285,39 @@ Which removes prior container/build state and starts from scratch.
 - creating the `eaie` user and setting passwords
 - switching SDDM away from the OEM `Calamares` flow
 - enabling the first-boot rootfs growth service
+- installing a first-boot native repair service for partial qemu builds
+- generating `initrd.img-*` before `/boot` is moved into `bootfs`
 - generating:
   - `bootfs.ext4`
   - `rootfs.ext4`
   - `bianbu-custom.sdcard`
   - `bianbu-custom.zip`
+
+Important update:
+
+- the automation no longer assumes the container build will always leave a
+  fully clean `dpkg` state
+- if qemu leaves the rootfs partially installed, the image is still packaged as
+  long as the required boot artifacts exist
+- the board then repairs itself natively on first boot and reboots once
+- the image must also contain `initrd.img-*` in `bootfs`, because
+  `bianbu-esos` injects `esos.elf` into the initrd and the board can stall
+  early without it
+
+### eMMC flashing and bootfs repair
+
+`scripts/eaie_flash.sh` provides the host-side fastboot flasher. It now also
+handles the fact that this board/bootloader may reject `fastboot reboot`; in
+that case, a manual reset or power cycle is required after the flash.
+
+`scripts/repair-bootfs-initrd.sh` provides the quickest recovery path for a bad
+`bootfs` artifact. It:
+
+- restores the staged `/boot` tree from `bootfs/`
+- runs `update-initramfs` in the staged `rootfs`
+- verifies that `esos.elf` is embedded in the resulting initrd
+- rebuilds `bootfs.ext4` while preserving the existing bootfs UUID
+- updates `pack_dir/bootfs.ext4` for `--bootfs-only` reflashing
 
 ### DTB patch helper
 
@@ -317,13 +380,24 @@ The repo now includes a first-boot rootfs expansion path using:
 This design is sound for the target layout, but it still needs validation with
 a newly generated image from the scripted flow.
 
-### 3. The SSH defaults are intentionally insecure
+### 3. The eMMC path still needs one clean end-to-end revalidation
+
+The repository now contains both:
+
+- the full fastboot flasher
+- the bootfs-only missing-initrd recovery helper
+
+But the repaired eMMC image has not yet been revalidated to a full successful
+userspace boot in the captured notes. That should be one of the first checks on
+the next machine.
+
+### 4. The SSH defaults are intentionally insecure
 
 Password SSH and root login were enabled because the immediate goal is rapid
 bring-up and deployment. This is acceptable for internal development but should
 be treated as temporary.
 
-### 4. DTB patching is not yet the long-term kernel workflow
+### 5. DTB patching is not yet the long-term kernel workflow
 
 The DTB redeploy path is excellent for bring-up, but it does not replace the
 need for a proper kernel source tree when you move beyond trivial DTS edits.
@@ -395,6 +469,8 @@ Boot the newly scripted image and confirm:
 - HDMI/GUI
 - SSH availability
 - first-boot rootfs expansion
+- initrd presence in `bootfs`
+- successful eMMC boot
 
 ### Third priority
 
@@ -403,6 +479,14 @@ Verify board-level development loops:
 - SSH file deployment
 - DTB redeploy
 - boot-logo replacement
+
+If the next machine starts from the currently captured broken eMMC state rather
+than from a full rebuild, the quickest recovery attempt is:
+
+```bash
+sudo bash scripts/repair-bootfs-initrd.sh
+sudo bash scripts/eaie_flash.sh --bootfs-only
+```
 
 ### Fourth priority
 

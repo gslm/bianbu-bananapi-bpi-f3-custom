@@ -61,6 +61,10 @@ workspace as the Docker bind mount. The script:
    - bianbu-custom.sdcard
    - bianbu-custom.zip
 
+If qemu leaves the desktop stack partially installed in the container, the
+script now packages a provisional image that repairs itself natively on the
+board during the first boot and then reboots once.
+
 Options:
   --clean    Remove prior build containers, downloads, rootfs staging, images,
              and script state before starting a fresh build.
@@ -141,7 +145,7 @@ ensure_apt_packages() {
 install_host_prereqs() {
     log_info "Checking host prerequisites"
 
-    ensure_apt_packages ca-certificates curl docker.io
+    ensure_apt_packages ca-certificates curl docker.io qemu-user-static
 
     if ! command -v sha256sum >/dev/null 2>&1; then
         die "sha256sum is required but was not found on the host."
@@ -210,7 +214,20 @@ download_inputs() {
 }
 
 install_qemu_support() {
-    log_info "Installing the pinned qemu-user-static host package"
+    log_info "Refreshing the host qemu-user-static package"
+    run_sudo apt-get update
+    run_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-user-static
+    run_sudo systemctl restart systemd-binfmt.service
+
+    local rvv_output
+    rvv_output="$("$ROOT_DIR/$RVV_FILE" 2>&1 || true)"
+
+    if [[ "$rvv_output" == *"spacemit"* ]]; then
+        log_ok "Using host qemu-user-static: $(qemu-riscv64-static --version | head -n 1)"
+        return
+    fi
+
+    log_warn "The host qemu-user-static did not pass the SpacemiT rvv check. Falling back to the pinned package."
 
     if dpkg-query -W -f='${Status}' binfmt-support 2>/dev/null | grep -q "install ok installed"; then
         log_warn "Purging binfmt-support because it conflicts with the SpacemiT qemu-user-static package"
@@ -220,14 +237,13 @@ install_qemu_support() {
     run_sudo dpkg -i "$ROOT_DIR/$QEMU_DEB_FILE"
     run_sudo systemctl restart systemd-binfmt.service
 
-    local rvv_output
     rvv_output="$("$ROOT_DIR/$RVV_FILE" 2>&1 || true)"
     if [[ "$rvv_output" != *"spacemit"* ]]; then
         printf '%s\n' "$rvv_output" >&2
-        die "qemu-user-static verification failed; rvv did not produce the expected output."
+        die "qemu-user-static verification failed; neither the host package nor the pinned fallback produced the expected rvv output."
     fi
 
-    log_ok "qemu-user-static is registered and working"
+    log_ok "Pinned qemu-user-static fallback is registered and working"
 }
 
 ensure_builder_image() {
@@ -275,7 +291,7 @@ ensure_container_running() {
         return
     fi
 
-    log_info "Starting existing builder container $name"
+    log_info "Starting existing builder container $name" >&2
     docker_cmd start "$name" >/dev/null
 }
 
@@ -283,7 +299,9 @@ create_container() {
     local name
     name="${CONTAINER_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)-$RANDOM"
 
-    log_info "Creating builder container $name"
+    # This function is used in command substitution, so progress logs must go to
+    # stderr and stdout must contain only the container name.
+    log_info "Creating builder container $name" >&2
     docker_cmd run --privileged -itd \
         -v "$ROOT_DIR:/mnt" \
         --name "$name" \
@@ -298,7 +316,7 @@ ensure_container() {
 
     existing="$(find_existing_container || true)"
     if [[ -n "$existing" ]]; then
-        log_ok "Reusing existing builder container $existing"
+        log_ok "Reusing existing builder container $existing" >&2
         ensure_container_running "$existing"
         printf '%s\n' "$existing"
         return

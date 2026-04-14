@@ -6,14 +6,18 @@ The automation for this workspace is split into:
 
 - [scripts/build-bianbu.sh](../scripts/build-bianbu.sh): host-side orchestration
 - [scripts/build-rootfs-in-container.sh](../scripts/build-rootfs-in-container.sh): container-side rootfs and image build
+- [scripts/eaie_flash.sh](../scripts/eaie_flash.sh): host-side eMMC fastboot flasher
 - [scripts/assets/expand-rootfs.sh](../scripts/assets/expand-rootfs.sh): first-boot rootfs grow helper
 - [scripts/assets/expand-rootfs.service](../scripts/assets/expand-rootfs.service): systemd unit that runs the grow helper once
+- [scripts/assets/firstboot-repair.sh](../scripts/assets/firstboot-repair.sh): first-boot native package-repair helper
+- [scripts/assets/firstboot-repair.service](../scripts/assets/firstboot-repair.service): systemd unit that repairs a partial image on the board
 
-The automation is pinned to the exact versions already used in this workspace:
+The automation is pinned to the exact versions already used in this workspace,
+except for host `qemu-user-static`, which is now handled in auto mode:
 
 - builder image: `harbor.spacemit.com/bianbu/bianbu@sha256:96ada91d222fab6ab676464e622d7f5dd49f8f4b747a13fae61f3134f1547400`
 - base rootfs: `bianbu-base-25.04.2-base-riscv64.tar.gz`
-- qemu host package: `qemu-user-static_8.0.4+dfsg-1ubuntu3.23.10.1_amd64.deb`
+- qemu fallback package: `qemu-user-static_8.0.4+dfsg-1ubuntu3.23.10.1_amd64.deb`
 - firmware helper inputs:
   - `fastboot.yaml`
   - `partition_2M.json`
@@ -36,12 +40,30 @@ The build is configured for:
 - `xterm`, `net-tools`, `qt6-wayland`, `cloud-guest-utils`, and `openssh-server` baked into the image
 - SSH enabled by default, with development-only password login for both `eaie` and `root`
 - an `8192M` rootfs image plus first-boot auto-expand
+- a native first-boot repair path if qemu leaves the rootfs in a partial state during the container build
+- an explicit `initrd.img-*` generation step before `bootfs.ext4` is packaged
 
 Calamares is kept installed, but the OEM `initer` flow is disabled by replacing
 SDDM autologin with the normal LXQt Wayland session.
 
 The image does not ship with fixed SSH host keys. They are removed during image
 creation and regenerated uniquely on first boot before `ssh.service` starts.
+
+If the container build completes cleanly, the image boots normally.
+
+If the container build hits the known qemu/riscv64 package-install problem, the
+automation now packages a provisional image as long as the required bootloader
+and kernel artifacts were installed. On first boot, the board runs
+`eaie-firstboot-repair.service`, repairs the package state natively, applies the
+final locale/timezone/runtime package configuration, and then reboots once.
+
+Boot-critical note:
+
+- the image must contain `initrd.img-6.6.63` in `bootfs`
+- `bianbu-esos` installs an initramfs hook that injects `usr/lib/firmware/esos.elf`
+  into the initrd
+- without that initrd, the kernel can fail early in the `spacemit-rproc` path
+  before the root filesystem is mounted
 
 ## Usage
 
@@ -69,10 +91,18 @@ It also regenerates at the repository root:
 - [bootfs.ext4](../bootfs.ext4)
 - [rootfs.ext4](../rootfs.ext4)
 
+For eMMC flashing after the build, see:
+
+- [docs/emmc-flashing.md](./emmc-flashing.md)
+
 ## Notes
 
-- The automation fails hard if the container build still leaves `dpkg` in a
-  broken state or if the Qt6 Wayland plugin is missing.
+- The host-side script now prefers the system `qemu-user-static` if it passes
+  the SpacemiT `rvv` check. It falls back to the older pinned SpacemiT package
+  only if the host runtime does not work.
+- The automation no longer assumes the container build can always finish the
+  desktop stack cleanly. It can package a provisional image that repairs itself
+  natively on first boot.
 - Autologin, password SSH, and the `eaie` passwords are development-only defaults.
 - `--clean` removes the build staging tree, generated images, pinned downloads,
   and builder containers whose names start with `build-bianbu-rootfs`.
