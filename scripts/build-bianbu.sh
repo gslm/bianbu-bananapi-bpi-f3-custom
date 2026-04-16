@@ -5,6 +5,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="$ROOT_DIR/.bianbu-build"
 CONTAINER_STATE_FILE="$STATE_DIR/container-name"
+SOURCE_ARTIFACT_ENV_FILE="$STATE_DIR/source-artifacts.env"
 
 CONTAINER_IMAGE="harbor.spacemit.com/bianbu/bianbu@sha256:96ada91d222fab6ab676464e622d7f5dd49f8f4b747a13fae61f3134f1547400"
 CONTAINER_NAME_PREFIX="build-bianbu-rootfs"
@@ -45,19 +46,24 @@ COLOR_MAGENTA=$'\033[1;35m'
 
 CLEAN_BUILD=0
 DOCKER_RUNNER=("docker")
+KERNEL_MODE="source"
+UBOOT_MODE="source"
+KERNEL_SOURCE_DEB=""
+UBOOT_SOURCE_DEB=""
 
 usage() {
     cat <<'EOF'
-Usage: scripts/build-bianbu.sh [--clean] [--help]
+Usage: scripts/build-bianbu.sh [--clean] [--kernel-mode source|default] [--uboot-mode source|default] [--help]
 
 Builds a pinned Bianbu 3.0 LXQt image for Banana Pi BPI-F3 using the current
 workspace as the Docker bind mount. The script:
 
 1. Installs/verifies host prerequisites.
-2. Downloads pinned upstream inputs into this workspace.
-3. Creates or reuses a privileged Docker build container with a random name.
-4. Builds the rootfs inside the container.
-5. Generates both:
+2. Builds kernel and/or U-Boot from source by default.
+3. Downloads pinned upstream inputs into this workspace.
+4. Creates or reuses a privileged Docker build container with a random name.
+5. Builds the rootfs inside the container.
+6. Generates both:
    - bianbu-custom.sdcard
    - bianbu-custom.zip
 
@@ -66,9 +72,20 @@ script now packages a provisional image that repairs itself natively on the
 board during the first boot and then reboots once.
 
 Options:
-  --clean    Remove prior build containers, downloads, rootfs staging, images,
-             and script state before starting a fresh build.
-  --help     Show this help text.
+  --clean            Remove prior build containers, downloads, rootfs staging,
+                     images, and script state before starting a fresh build.
+                     Existing source checkouts under ./sources are preserved.
+  --kernel-mode      Select the kernel path: source or default.
+  --uboot-mode       Select the U-Boot path: source or default.
+  --kernel-default   Shortcut for --kernel-mode default.
+  --kernel-source    Shortcut for --kernel-mode source.
+  --uboot-default    Shortcut for --uboot-mode default.
+  --uboot-source     Shortcut for --uboot-mode source.
+  --help             Show this help text.
+
+Default behavior:
+  --kernel-mode source
+  --uboot-mode source
 EOF
 }
 
@@ -91,6 +108,18 @@ log_error() {
 die() {
     log_error "$*"
     exit 1
+}
+
+validate_modes() {
+    case "$KERNEL_MODE" in
+        source|default) ;;
+        *) die "Unsupported kernel mode: $KERNEL_MODE" ;;
+    esac
+
+    case "$UBOOT_MODE" in
+        source|default) ;;
+        *) die "Unsupported U-Boot mode: $UBOOT_MODE" ;;
+    esac
 }
 
 run_sudo() {
@@ -163,12 +192,72 @@ install_host_prereqs() {
         die "dpkg is required on the host."
     fi
 
+    if [[ "$KERNEL_MODE" == "source" || "$UBOOT_MODE" == "source" ]]; then
+        ensure_apt_packages \
+            git \
+            build-essential \
+            bc \
+            cpio \
+            file \
+            rsync \
+            dpkg-dev \
+            fakeroot \
+            debhelper \
+            devscripts \
+            flex \
+            bison \
+            libssl-dev \
+            libelf-dev \
+            libpython3-dev \
+            libgnutls28-dev \
+            libncurses5-dev \
+            libncurses-dev \
+            libpfm4-dev \
+            libtraceevent-dev \
+            asciidoc \
+            device-tree-compiler \
+            python-is-python3 \
+            python3-pyelftools \
+            python3-setuptools \
+            swig \
+            uuid-dev \
+            u-boot-tools
+    fi
+
     if ! docker info >/dev/null 2>&1 && ! sudo docker info >/dev/null 2>&1; then
         run_sudo systemctl enable --now docker >/dev/null 2>&1 || true
     fi
 
     ensure_docker_access
     log_ok "Host prerequisites look usable"
+}
+
+prepare_source_artifacts() {
+    if [[ "$KERNEL_MODE" == "default" && "$UBOOT_MODE" == "default" ]]; then
+        rm -f "$SOURCE_ARTIFACT_ENV_FILE"
+        KERNEL_SOURCE_DEB=""
+        UBOOT_SOURCE_DEB=""
+        log_ok "Using packaged kernel and packaged U-Boot artifacts"
+        return
+    fi
+
+    log_info "Preparing source-built BSP artifacts"
+    ARTIFACT_ENV_FILE="$SOURCE_ARTIFACT_ENV_FILE" \
+    KERNEL_MODE="$KERNEL_MODE" \
+    UBOOT_MODE="$UBOOT_MODE" \
+        bash "$ROOT_DIR/scripts/build-source-artifacts.sh"
+
+    [[ -f "$SOURCE_ARTIFACT_ENV_FILE" ]] || die "Source artifact env file was not created: $SOURCE_ARTIFACT_ENV_FILE"
+    # shellcheck disable=SC1090
+    source "$SOURCE_ARTIFACT_ENV_FILE"
+
+    if [[ "$KERNEL_MODE" == "source" && -z "$KERNEL_SOURCE_DEB" ]]; then
+        die "Kernel source mode was requested, but no kernel package path was produced."
+    fi
+
+    if [[ "$UBOOT_MODE" == "source" && -z "$UBOOT_SOURCE_DEB" ]]; then
+        die "U-Boot source mode was requested, but no U-Boot package path was produced."
+    fi
 }
 
 sha256_file() {
@@ -356,6 +445,10 @@ clean_workspace() {
         "$ROOT_DIR/$RVV_FILE" \
         "$STATE_DIR"
 
+    run_sudo rm -rf \
+        "$ROOT_DIR/sources/kernel/"*.deb \
+        "$ROOT_DIR/sources/u-boot/"*.deb
+
     mkdir -p "$STATE_DIR"
     log_ok "Previous build state removed"
 }
@@ -376,6 +469,10 @@ run_container_build() {
         -e DEFAULT_TIMEZONE=America/Sao_Paulo \
         -e DEFAULT_USER=eaie \
         -e DEFAULT_PASSWORD=eaie \
+        -e KERNEL_MODE="$KERNEL_MODE" \
+        -e UBOOT_MODE="$UBOOT_MODE" \
+        -e KERNEL_SOURCE_DEB="$KERNEL_SOURCE_DEB" \
+        -e UBOOT_SOURCE_DEB="$UBOOT_SOURCE_DEB" \
         -w /mnt \
         "$container_name" \
         bash /mnt/scripts/build-rootfs-in-container.sh
@@ -388,6 +485,28 @@ parse_args() {
         case "$1" in
             --clean)
                 CLEAN_BUILD=1
+                ;;
+            --kernel-mode)
+                [[ $# -ge 2 ]] || die "--kernel-mode requires a value"
+                KERNEL_MODE="$2"
+                shift
+                ;;
+            --uboot-mode)
+                [[ $# -ge 2 ]] || die "--uboot-mode requires a value"
+                UBOOT_MODE="$2"
+                shift
+                ;;
+            --kernel-default)
+                KERNEL_MODE="default"
+                ;;
+            --kernel-source)
+                KERNEL_MODE="source"
+                ;;
+            --uboot-default)
+                UBOOT_MODE="default"
+                ;;
+            --uboot-source)
+                UBOOT_MODE="source"
                 ;;
             --help|-h)
                 usage
@@ -404,6 +523,7 @@ parse_args() {
 main() {
     mkdir -p "$STATE_DIR"
     parse_args "$@"
+    validate_modes
 
     if [[ "$CLEAN_BUILD" -eq 1 ]]; then
         install_host_prereqs
@@ -411,6 +531,7 @@ main() {
     fi
 
     install_host_prereqs
+    prepare_source_artifacts
     download_inputs
     install_qemu_support
     ensure_builder_image

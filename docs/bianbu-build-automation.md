@@ -5,12 +5,15 @@
 The automation for this workspace is split into:
 
 - [scripts/build-bianbu.sh](../scripts/build-bianbu.sh): host-side orchestration
+- [scripts/build-source-artifacts.sh](../scripts/build-source-artifacts.sh): host-side kernel/U-Boot source checkout and package build helper
 - [scripts/build-rootfs-in-container.sh](../scripts/build-rootfs-in-container.sh): container-side rootfs and image build
 - [scripts/eaie_flash.sh](../scripts/eaie_flash.sh): host-side eMMC fastboot flasher
+- [scripts/run-display-cycle-local.sh](../scripts/run-display-cycle-local.sh): board-local HDMI demo loop
 - [scripts/assets/expand-rootfs.sh](../scripts/assets/expand-rootfs.sh): first-boot rootfs grow helper
 - [scripts/assets/expand-rootfs.service](../scripts/assets/expand-rootfs.service): systemd unit that runs the grow helper once
 - [scripts/assets/firstboot-repair.sh](../scripts/assets/firstboot-repair.sh): first-boot native package-repair helper
 - [scripts/assets/firstboot-repair.service](../scripts/assets/firstboot-repair.service): systemd unit that repairs a partial image on the board
+- [scripts/assets/eaie-display-cycle.desktop](../scripts/assets/eaie-display-cycle.desktop): LXQt launcher for the built-in HDMI demo loop
 
 The automation is pinned to the exact versions already used in this workspace,
 except for host `qemu-user-static`, which is now handled in auto mode:
@@ -32,19 +35,35 @@ The build is configured for:
 - BPI-F3 stock board target
 - Bianbu 3.0.1 / `plucky`
 - LXQt desktop image (`bianbu-desktop-lite`)
+- source-built kernel by default
+- source-built U-Boot by default
+- packaged OpenSBI by default
 - default locale `en_US.UTF-8`
 - default timezone `America/Sao_Paulo`
 - default user `eaie` with password `eaie`
 - `root` password `eaie`
 - SDDM autologin into `lxqt-wayland`
-- `xterm`, `net-tools`, `qt6-wayland`, `cloud-guest-utils`, and `openssh-server` baked into the image
+- `xterm`, `net-tools`, `qt6-wayland`, `cloud-guest-utils`, `openssh-server`, and `ffmpeg` baked into the image
 - SSH enabled by default, with development-only password login for both `eaie` and `root`
 - an `8192M` rootfs image plus first-boot auto-expand
 - a native first-boot repair path if qemu leaves the rootfs in a partial state during the container build
 - an explicit `initrd.img-*` generation step before `bootfs.ext4` is packaged
+- the repo wallpaper [screen.png](../screen.png) installed into `/usr/local/share/eaie-display-cycle/screen.png`
+- the board-local demo runner installed as `/usr/local/bin/eaie-display-cycle`
+- an LXQt application launcher for the display demo installed as `EAIE Display Cycle`
+- LXQt system wallpaper defaults updated so first boot uses the repo wallpaper
 
 Calamares is kept installed, but the OEM `initer` flow is disabled by replacing
 SDDM autologin with the normal LXQt Wayland session.
+
+Kernel/U-Boot mode behavior:
+
+- `scripts/build-bianbu.sh` now defaults to `--kernel-mode source --uboot-mode source`
+- source mode reuses source checkouts under `sources/` if they already exist
+- source mode clones missing source trees and downloads the SpacemiT cross toolchain under `sources/toolchains/`
+- source mode builds Debian packages from source on the host, then stages those package contents into the image rootfs before packaging
+- `--kernel-default` and `--uboot-default` switch back to the packaged Bianbu kernel/U-Boot artifacts
+- the current source path still keeps `opensbi-spacemit` from the packaged flow
 
 The image does not ship with fixed SSH host keys. They are removed during image
 creation and regenerated uniquely on first boot before `ssh.service` starts.
@@ -79,6 +98,18 @@ To fully reset the build state first:
 bash scripts/build-bianbu.sh --clean
 ```
 
+To force the old fully packaged BSP path:
+
+```bash
+bash scripts/build-bianbu.sh --kernel-default --uboot-default
+```
+
+To mix a source-built kernel with the packaged bootloader:
+
+```bash
+bash scripts/build-bianbu.sh --uboot-default
+```
+
 ## Output Artifacts
 
 The script writes these files at the repository root:
@@ -91,9 +122,40 @@ It also regenerates at the repository root:
 - [bootfs.ext4](../bootfs.ext4)
 - [rootfs.ext4](../rootfs.ext4)
 
+Source workflow side effects:
+
+- source checkouts live under `sources/`
+- source-built Debian packages are written under `sources/kernel/` and `sources/u-boot/`
+- the downloaded cross toolchain is kept under `sources/toolchains/`
+- `--clean` preserves source checkouts and the extracted toolchain, but removes the generated `.deb` build outputs and regular image staging state
+
 For eMMC flashing after the build, see:
 
 - [docs/emmc-flashing.md](./emmc-flashing.md)
+
+## Built-In Display Demo
+
+New images now include a board-local HDMI demo loop:
+
+```bash
+eaie-display-cycle
+```
+
+By default it runs:
+
+- camera preview for 60 seconds
+- fullscreen test-pattern screensaver for 30 seconds
+- normal desktop with the repo wallpaper for 30 seconds
+
+The built-in wallpaper path is:
+
+- `/usr/local/share/eaie-display-cycle/screen.png`
+
+Example with shorter timings:
+
+```bash
+eaie-display-cycle --camera-seconds 10 --screensaver-seconds 10 --desktop-seconds 10
+```
 
 ## Notes
 

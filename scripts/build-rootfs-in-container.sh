@@ -13,13 +13,19 @@ DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-America/Sao_Paulo}"
 DEFAULT_USER="${DEFAULT_USER:-eaie}"
 DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-eaie}"
 ALLOW_PARTIAL_ROOTFS="${ALLOW_PARTIAL_ROOTFS:-1}"
+KERNEL_MODE="${KERNEL_MODE:-source}"
+UBOOT_MODE="${UBOOT_MODE:-source}"
+KERNEL_SOURCE_DEB="${KERNEL_SOURCE_DEB:-}"
+UBOOT_SOURCE_DEB="${UBOOT_SOURCE_DEB:-}"
 
 REPO="archive.spacemit.com/bianbu"
 IMAGE_PREFIX="bianbu-custom"
 FIRSTBOOT_REPAIR_STATE_DIR="/var/lib/eaie-firstboot-repair"
 FIRSTBOOT_REPAIR_MARKER="${FIRSTBOOT_REPAIR_STATE_DIR}/enabled"
 PARTIAL_BUILD=0
-REPAIR_PACKAGES="initramfs-tools bianbu-esos img-gpu-powervr k1x-vpu-firmware k1x-cam spacemit-uart-bt spacemit-modules-usrload opensbi-spacemit u-boot-spacemit linux-generic bianbu-minimal bianbu-desktop-lite locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server"
+CORE_BOOT_PACKAGES=""
+REPAIR_PACKAGES=""
+PRIMARY_KERNEL_VERSION=""
 
 COLOR_RESET=$'\033[0m'
 COLOR_CYAN=$'\033[1;36m'
@@ -46,8 +52,29 @@ die() {
 
 cd "$WORKSPACE"
 
+ensure_riscv_loader_compat() {
+    local usr_loader="$TARGET_ROOTFS/usr/lib/ld-linux-riscv64-lp64d.so.1"
+    local compat_loader="$TARGET_ROOTFS/lib/ld-linux-riscv64-lp64d.so.1"
+    local usr_multiarch_dir="$TARGET_ROOTFS/usr/lib/riscv64-linux-gnu"
+    local compat_multiarch_dir="$TARGET_ROOTFS/lib/riscv64-linux-gnu"
+
+    [[ -e "$usr_loader" ]] || die "The staged rootfs is missing the RISC-V dynamic loader: $usr_loader"
+
+    if [[ ! -e "$TARGET_ROOTFS/lib" ]]; then
+        mkdir -p "$TARGET_ROOTFS/lib"
+    fi
+
+    if [[ ! -L "$TARGET_ROOTFS/lib" ]]; then
+        ln -sfn ../usr/lib/ld-linux-riscv64-lp64d.so.1 "$compat_loader"
+        if [[ -d "$usr_multiarch_dir" && ! -e "$compat_multiarch_dir" ]]; then
+            ln -sfn ../usr/lib/riscv64-linux-gnu "$compat_multiarch_dir"
+        fi
+    fi
+}
+
 run_in_chroot() {
     local cmd="$1"
+    ensure_riscv_loader_compat
     chroot "$TARGET_ROOTFS" /bin/bash -c "$cmd"
 }
 
@@ -96,6 +123,187 @@ enable_rootfs_unit_if_present() {
     fi
 
     log_warn "Systemd unit is not present in the current rootfs yet: $unit"
+}
+
+set_ini_key() {
+    local file="$1"
+    local section="$2"
+    local key="$3"
+    local value="$4"
+
+    if grep -q "^${key}=" "$file"; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+        return
+    fi
+
+    if grep -q "^\[${section}\]" "$file"; then
+        sed -i "/^\[${section}\]/a ${key}=${value}" "$file"
+        return
+    fi
+
+    printf '\n[%s]\n%s=%s\n' "$section" "$key" "$value" >>"$file"
+}
+
+validate_build_modes() {
+    case "$KERNEL_MODE" in
+        source|default) ;;
+        *) die "Unsupported kernel mode: $KERNEL_MODE" ;;
+    esac
+
+    case "$UBOOT_MODE" in
+        source|default) ;;
+        *) die "Unsupported U-Boot mode: $UBOOT_MODE" ;;
+    esac
+}
+
+compose_package_sets() {
+    local packages=(
+        initramfs-tools
+        bianbu-esos
+        img-gpu-powervr
+        k1x-vpu-firmware
+        k1x-cam
+        spacemit-uart-bt
+        spacemit-modules-usrload
+        opensbi-spacemit
+    )
+
+    if [[ "$KERNEL_MODE" == "default" ]]; then
+        packages+=(linux-generic)
+    else
+        [[ -n "$KERNEL_SOURCE_DEB" ]] || die "Kernel source mode requires KERNEL_SOURCE_DEB to be set"
+    fi
+
+    if [[ "$UBOOT_MODE" == "default" ]]; then
+        packages+=(u-boot-spacemit)
+    else
+        [[ -n "$UBOOT_SOURCE_DEB" ]] || die "U-Boot source mode requires UBOOT_SOURCE_DEB to be set"
+    fi
+
+    CORE_BOOT_PACKAGES="${packages[*]}"
+    REPAIR_PACKAGES="${CORE_BOOT_PACKAGES} bianbu-minimal bianbu-desktop-lite locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server ffmpeg"
+}
+
+resolve_workspace_path() {
+    local path="$1"
+
+    if [[ "$path" == /* ]]; then
+        printf '%s\n' "$path"
+        return
+    fi
+
+    printf '%s/%s\n' "$WORKSPACE" "$path"
+}
+
+cleanup_staged_kernel_artifacts() {
+    rm -rf "$TARGET_ROOTFS/boot/spacemit" \
+        "$TARGET_ROOTFS/lib/modules/"* \
+        "$TARGET_ROOTFS/usr/lib/linux-image-"*
+    rm -f "$TARGET_ROOTFS/boot"/vmlinuz-* \
+        "$TARGET_ROOTFS/boot"/initrd.img-* \
+        "$TARGET_ROOTFS/boot"/System.map-* \
+        "$TARGET_ROOTFS/boot"/config-* \
+        "$TARGET_ROOTFS/boot"/env_k1-x.txt
+}
+
+cleanup_staged_uboot_artifacts() {
+    rm -rf "$TARGET_ROOTFS/usr/lib/u-boot/spacemit"
+}
+
+detect_primary_kernel_version() {
+    PRIMARY_KERNEL_VERSION="$(find "$TARGET_ROOTFS/boot" -maxdepth 1 -type f -name 'vmlinuz-*' -printf '%f\n' \
+        | sed 's/^vmlinuz-//' \
+        | sort -V \
+        | tail -n 1)"
+
+    [[ -n "$PRIMARY_KERNEL_VERSION" ]] || die "Could not detect a primary kernel version from $TARGET_ROOTFS/boot"
+}
+
+stage_kernel_dtbs_into_boot() {
+    local source_dtb_dir
+    local boot_dtb_dir
+
+    detect_primary_kernel_version
+    source_dtb_dir="$TARGET_ROOTFS/usr/lib/linux-image-$PRIMARY_KERNEL_VERSION/spacemit"
+    boot_dtb_dir="$TARGET_ROOTFS/boot/spacemit/$PRIMARY_KERNEL_VERSION"
+
+    [[ -d "$source_dtb_dir" ]] || die "The source-built kernel package does not provide SpacemiT DTBs under $source_dtb_dir"
+
+    mkdir -p "$boot_dtb_dir"
+    rsync -a --delete "$source_dtb_dir/" "$boot_dtb_dir/"
+}
+
+apply_kernel_source_deb() {
+    local source_deb
+    local unpack_dir
+    source_deb="$(resolve_workspace_path "$KERNEL_SOURCE_DEB")"
+
+    [[ -f "$source_deb" ]] || die "Kernel source package not found: $source_deb"
+
+    log_info "Overlaying kernel artifacts from source package $(basename "$source_deb")"
+    cleanup_staged_kernel_artifacts
+    unpack_dir="$(mktemp -d)"
+    dpkg-deb -x "$source_deb" "$unpack_dir"
+
+    [[ -d "$unpack_dir/boot" ]] && rsync -a "$unpack_dir/boot/" "$TARGET_ROOTFS/boot/"
+    [[ -d "$unpack_dir/etc" ]] && rsync -a "$unpack_dir/etc/" "$TARGET_ROOTFS/etc/"
+    [[ -d "$unpack_dir/lib" ]] && rsync -a "$unpack_dir/lib/" "$TARGET_ROOTFS/lib/"
+    [[ -d "$unpack_dir/usr" ]] && rsync -a "$unpack_dir/usr/" "$TARGET_ROOTFS/usr/"
+    rm -rf "$unpack_dir"
+
+    detect_primary_kernel_version
+    stage_kernel_dtbs_into_boot
+    if ! run_in_chroot "depmod '$PRIMARY_KERNEL_VERSION'"; then
+        log_warn "depmod did not complete cleanly for the source-built kernel $PRIMARY_KERNEL_VERSION"
+    fi
+
+    log_ok "Source-built kernel artifacts were staged into the rootfs"
+}
+
+apply_uboot_source_deb() {
+    local source_deb
+    source_deb="$(resolve_workspace_path "$UBOOT_SOURCE_DEB")"
+
+    [[ -f "$source_deb" ]] || die "U-Boot source package not found: $source_deb"
+
+    log_info "Overlaying U-Boot artifacts from source package $(basename "$source_deb")"
+    cleanup_staged_uboot_artifacts
+    dpkg-deb -x "$source_deb" "$TARGET_ROOTFS"
+
+    log_ok "Source-built U-Boot artifacts were staged into the rootfs"
+}
+
+apply_source_package_overlays() {
+    if [[ "$KERNEL_MODE" == "source" ]]; then
+        apply_kernel_source_deb
+    fi
+
+    if [[ "$UBOOT_MODE" == "source" ]]; then
+        apply_uboot_source_deb
+    fi
+}
+
+update_boot_env_txt() {
+    local dtb_version=""
+
+    detect_primary_kernel_version
+    [[ -d "$TARGET_ROOTFS/boot/spacemit" ]] || die "The staged /boot tree does not contain a spacemit DTB directory"
+
+    if [[ -d "$TARGET_ROOTFS/boot/spacemit/$PRIMARY_KERNEL_VERSION" ]]; then
+        dtb_version="$PRIMARY_KERNEL_VERSION"
+    else
+        dtb_version="$(find "$TARGET_ROOTFS/boot/spacemit" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -n 1)"
+    fi
+
+    [[ -n "$dtb_version" ]] || die "Could not determine the DTB directory version for env_k1-x.txt"
+
+    cat >"$TARGET_ROOTFS/boot/env_k1-x.txt" <<EOF
+knl_name=vmlinuz-$PRIMARY_KERNEL_VERSION
+ramdisk_name=initrd.img-$PRIMARY_KERNEL_VERSION
+dtb_dir=spacemit/$dtb_version
+EOF
+
+    log_ok "Updated env_k1-x.txt for kernel $PRIMARY_KERNEL_VERSION"
 }
 
 mount_rootfs() {
@@ -170,7 +378,7 @@ install_rootfs_packages() {
     log_info "Installing hardware support, desktop packages, and required extras"
 
     run_in_chroot "apt-get update"
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install initramfs-tools bianbu-esos img-gpu-powervr k1x-vpu-firmware k1x-cam spacemit-uart-bt spacemit-modules-usrload opensbi-spacemit u-boot-spacemit linux-generic"; then
+    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install ${CORE_BOOT_PACKAGES}"; then
         PARTIAL_BUILD=1
         log_warn "Core package installation failed under qemu. The build will continue in partial-repair mode."
     fi
@@ -185,7 +393,7 @@ install_rootfs_packages() {
         log_warn "bianbu-desktop-lite did not install cleanly under qemu. Deferring repair to first boot."
     fi
 
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server"; then
+    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server ffmpeg"; then
         PARTIAL_BUILD=1
         log_warn "Customization packages did not install cleanly under qemu. Deferring repair to first boot."
     fi
@@ -366,6 +574,53 @@ EOF
     log_ok "SDDM is configured for LXQt Wayland autologin"
 }
 
+install_display_demo_assets() {
+    log_info "Installing the EAIE display-demo assets"
+
+    local wallpaper_source="$WORKSPACE/screen.png"
+    local script_source="$WORKSPACE/scripts/run-display-cycle-local.sh"
+    local launcher_source="$WORKSPACE/scripts/assets/eaie-display-cycle.desktop"
+    local demo_share_dir="$TARGET_ROOTFS/usr/local/share/eaie-display-cycle"
+    local demo_wallpaper="${demo_share_dir}/screen.png"
+    local settings_file="$TARGET_ROOTFS/etc/xdg/pcmanfm-qt/lxqt/settings.conf"
+
+    [[ -f "$wallpaper_source" ]] || die "Display-demo wallpaper is missing from the workspace: $wallpaper_source"
+    [[ -f "$script_source" ]] || die "Board-local display-demo script is missing from the workspace: $script_source"
+    [[ -f "$launcher_source" ]] || die "Display-demo desktop launcher is missing from the workspace: $launcher_source"
+
+    install -Dm0755 "$script_source" \
+        "$TARGET_ROOTFS/usr/local/bin/eaie-display-cycle"
+    install -Dm0644 "$wallpaper_source" \
+        "$demo_wallpaper"
+    install -Dm0644 "$launcher_source" \
+        "$TARGET_ROOTFS/usr/share/applications/eaie-display-cycle.desktop"
+
+    mkdir -p "$(dirname "$settings_file")"
+    if [[ ! -f "$settings_file" ]]; then
+        cat >"$settings_file" <<EOF
+[Desktop]
+DesktopShortcuts=Home, Trash, Computer
+Wallpaper=$demo_wallpaper
+WallpaperMode=fit
+WallpaperRandomize=false
+
+[System]
+Archiver=xarchiver
+FallbackIconThemeName=oxygen
+Terminal=qterminal
+
+[Window]
+AlwaysShowTabs=true
+EOF
+    else
+        set_ini_key "$settings_file" "Desktop" "Wallpaper" "$demo_wallpaper"
+        set_ini_key "$settings_file" "Desktop" "WallpaperMode" "fit"
+        set_ini_key "$settings_file" "Desktop" "WallpaperRandomize" "false"
+    fi
+
+    log_ok "The display-demo runner, wallpaper, and launcher are installed into the image"
+}
+
 generate_initramfs_images() {
     log_info "Generating initramfs images for installed kernels"
 
@@ -386,6 +641,7 @@ generate_initramfs_images() {
     done <<<"$versions"
 
     [[ "$found" -eq 1 ]] || die "No kernel versions were discovered for initramfs generation."
+    update_boot_env_txt
     log_ok "initramfs images are present in /boot"
 }
 
@@ -553,17 +809,21 @@ cleanup_rootfs_caches() {
 }
 
 main() {
+    validate_build_modes
+    compose_package_sets
     install_container_tools
     prepare_rootfs_tree
     mount_rootfs
     write_bianbu_sources
     install_rootfs_packages
     repair_and_validate_packages
+    apply_source_package_overlays
     configure_locale_timezone
     configure_users
     configure_network
     configure_ssh
     configure_sddm_autologin
+    install_display_demo_assets
     install_firstboot_repair_service
     install_rootfs_expand_service
     generate_initramfs_images

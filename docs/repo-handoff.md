@@ -15,7 +15,9 @@ The current state proves all of the following:
 - the booted image can be customized in userspace without rebuilding from
   scratch for every small test
 - the display stack issue was traced to a missing Qt6 Wayland runtime plugin
+- the custom image can now ship a built-in HDMI demo loop plus wallpaper asset
 - a DTB can be replaced on the target and picked up successfully at next boot
+- the build system now supports either packaged or source-built kernel/U-Boot inputs
 
 ## What We Successfully Changed
 
@@ -129,6 +131,40 @@ Validated first eMMC-boot baseline:
 
 That is the clean pre-device-tree baseline for future board customization.
 
+### 7. Built-in display demo assets
+
+We added a repo-level display demo that is now installed directly into the
+custom image:
+
+- `/usr/local/bin/eaie-display-cycle`
+- `/usr/local/share/eaie-display-cycle/screen.png`
+- `EAIE Display Cycle` launcher in the LXQt application menu
+
+The demo loop runs:
+
+- camera preview
+- fullscreen test-pattern screensaver
+- normal LXQt desktop with the repo wallpaper
+
+This makes the current HDMI/camera demonstration reproducible on freshly built
+images without a separate post-flash deployment step.
+
+### 8. Source-build BSP modes
+
+The host build entrypoint now supports two paths for the BSP components:
+
+- `source` mode for kernel and U-Boot
+- `default` mode for the packaged kernel and packaged U-Boot
+
+Current default behavior is:
+
+- source-built kernel
+- source-built U-Boot
+- packaged OpenSBI
+
+The source path works by building Debian packages on the host and then staging
+their contents into the generated rootfs before bootfs/image packaging.
+
 ## Reusable Files Now In This Repo
 
 These are the main source artifacts now present in the Git repo.
@@ -136,10 +172,13 @@ These are the main source artifacts now present in the Git repo.
 ### Scripts
 
 - [scripts/build-bianbu.sh](../scripts/build-bianbu.sh)
+- [scripts/build-source-artifacts.sh](../scripts/build-source-artifacts.sh)
 - [scripts/build-rootfs-in-container.sh](../scripts/build-rootfs-in-container.sh)
 - [scripts/eaie_flash.sh](../scripts/eaie_flash.sh)
 - [scripts/repair-bootfs-initrd.sh](../scripts/repair-bootfs-initrd.sh)
 - [scripts/patch-dtb-model.sh](../scripts/patch-dtb-model.sh)
+- [scripts/run-display-cycle.sh](../scripts/run-display-cycle.sh)
+- [scripts/run-display-cycle-local.sh](../scripts/run-display-cycle-local.sh)
 
 ### Script assets
 
@@ -148,11 +187,14 @@ These are the main source artifacts now present in the Git repo.
 - [scripts/assets/ssh-hostkeys.service](../scripts/assets/ssh-hostkeys.service)
 - [scripts/assets/firstboot-repair.sh](../scripts/assets/firstboot-repair.sh)
 - [scripts/assets/firstboot-repair.service](../scripts/assets/firstboot-repair.service)
+- [scripts/assets/eaie-display-cycle.desktop](../scripts/assets/eaie-display-cycle.desktop)
 
 ### Documentation
 
 - [docs/bianbu-image-update-instructions.md](./bianbu-image-update-instructions.md)
 - [docs/bianbu-build-automation.md](./bianbu-build-automation.md)
+- [docs/ai-demo-selection-handoff.md](./ai-demo-selection-handoff.md)
+- [docs/board-faq.md](./board-faq.md)
 - [docs/emmc-flashing.md](./emmc-flashing.md)
 - [docs/development-handoff.md](./development-handoff.md)
 - [docs/repo-handoff.md](./repo-handoff.md)
@@ -160,6 +202,7 @@ These are the main source artifacts now present in the Git repo.
 ### Repo test asset
 
 - [eaie-256-ffmpeg.bmp](../eaie-256-ffmpeg.bmp)
+- [screen.png](../screen.png)
 
 ## Important Files Modified Outside This Repo
 
@@ -184,6 +227,11 @@ want to vendor large binaries into version control.
 - `pack_dir/`
 - `rootfs/`
 - `bootfs/` except for explicitly tracked curated assets
+- `sources/kernel/*.deb`
+- `sources/u-boot/*.deb`
+- `sources/toolchains/`
+- `sources/kernel/linux-6.6/`
+- `sources/u-boot/uboot-2022.10/`
 
 ### Downloaded inputs
 

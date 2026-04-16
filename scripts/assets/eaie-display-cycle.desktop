@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=EAIE Display Cycle
+Comment=Run the EAIE HDMI camera, screensaver, and wallpaper demo loop
+Exec=qterminal -e /usr/local/bin/eaie-display-cycle
+TryExec=qterminal
+Icon=camera-video
+Terminal=false
+Categories=AudioVideo;Utility;
+StartupNotify=true

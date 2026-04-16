@@ -201,6 +201,12 @@ Validated fix:
 
 - installing `qt6-wayland` fixed the GUI
 
+Additional validated userland demo behavior:
+
+- a fullscreen `ffplay` test-pattern screensaver renders correctly on HDMI
+- a USB UVC camera preview renders correctly on HDMI when the USB link is stable
+- the repo now ships a board-local display demo loop inside the custom image
+
 ### SSH
 
 Observed:
@@ -254,10 +260,13 @@ exposed deployment.
 ### Main automation scripts
 
 - [scripts/build-bianbu.sh](../scripts/build-bianbu.sh)
+- [scripts/build-source-artifacts.sh](../scripts/build-source-artifacts.sh)
 - [scripts/build-rootfs-in-container.sh](../scripts/build-rootfs-in-container.sh)
 - [scripts/eaie_flash.sh](../scripts/eaie_flash.sh)
 - [scripts/repair-bootfs-initrd.sh](../scripts/repair-bootfs-initrd.sh)
 - [scripts/patch-dtb-model.sh](../scripts/patch-dtb-model.sh)
+- [scripts/run-display-cycle.sh](../scripts/run-display-cycle.sh)
+- [scripts/run-display-cycle-local.sh](../scripts/run-display-cycle-local.sh)
 
 ### Supporting systemd/service assets
 
@@ -266,11 +275,14 @@ exposed deployment.
 - [scripts/assets/ssh-hostkeys.service](../scripts/assets/ssh-hostkeys.service)
 - [scripts/assets/firstboot-repair.sh](../scripts/assets/firstboot-repair.sh)
 - [scripts/assets/firstboot-repair.service](../scripts/assets/firstboot-repair.service)
+- [scripts/assets/eaie-display-cycle.desktop](../scripts/assets/eaie-display-cycle.desktop)
 
 ### Documentation
 
 - [docs/bianbu-build-automation.md](./bianbu-build-automation.md)
 - [docs/bianbu-image-update-instructions.md](./bianbu-image-update-instructions.md)
+- [docs/ai-demo-selection-handoff.md](./ai-demo-selection-handoff.md)
+- [docs/board-faq.md](./board-faq.md)
 - [docs/emmc-flashing.md](./emmc-flashing.md)
 - [docs/repo-handoff.md](./repo-handoff.md)
 - [docs/development-handoff.md](./development-handoff.md)
@@ -282,6 +294,9 @@ exposed deployment.
 `scripts/build-bianbu.sh` is responsible for:
 
 - checking/installing host prerequisites
+- defaulting to source-built kernel and source-built U-Boot
+- accepting `--kernel-mode` and `--uboot-mode`, plus `--kernel-default` and `--uboot-default` shortcuts
+- invoking the host-side source helper when source mode is selected
 - pulling the pinned Docker builder image
 - downloading pinned upstream inputs
 - preferring the host `qemu-user-static` if it passes the `rvv` check
@@ -295,6 +310,21 @@ It also supports:
 - `--clean`
 
 Which removes prior container/build state and starts from scratch.
+
+Important behavior:
+
+- `--clean` preserves source checkouts under `sources/`
+- source-built `.deb` outputs are removed, but the source trees themselves are not
+
+### Host-side source helper
+
+`scripts/build-source-artifacts.sh` is responsible for:
+
+- cloning the kernel source checkout into `sources/kernel/linux-6.6` when missing
+- cloning the U-Boot source checkout into `sources/u-boot/uboot-2022.10` when missing
+- downloading the SpacemiT cross toolchain into `sources/toolchains/` when missing
+- building Debian packages from source on the host
+- writing the selected source-built package paths into `.bianbu-build/source-artifacts.env`
 
 ### Container-side build logic
 
@@ -310,9 +340,13 @@ Which removes prior container/build state and starts from scratch.
   - `net-tools`
   - `cloud-guest-utils`
   - `openssh-server`
+- installing `ffmpeg` so the built image can run the HDMI demo loop without extra packages
 - fixing locale and timezone
 - creating the `eaie` user and setting passwords
 - switching SDDM away from the OEM `Calamares` flow
+- overlaying source-built kernel and/or U-Boot package contents into the staged rootfs when source mode is selected
+- regenerating `bootfs/env_k1-x.txt` to match the selected kernel version
+- installing the repo wallpaper and board-local display demo runner into the image
 - enabling the first-boot rootfs growth service
 - installing a first-boot native repair service for partial qemu builds
 - generating `initrd.img-*` before `/boot` is moved into `bootfs`
