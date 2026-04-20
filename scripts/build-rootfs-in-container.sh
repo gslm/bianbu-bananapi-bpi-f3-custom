@@ -13,6 +13,10 @@ DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-America/Sao_Paulo}"
 DEFAULT_USER="${DEFAULT_USER:-eaie}"
 DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-eaie}"
 ALLOW_PARTIAL_ROOTFS="${ALLOW_PARTIAL_ROOTFS:-1}"
+BOARD_PROFILE="${BOARD_PROFILE:-bpi-f3}"
+BOARD_SOURCE_DTB_NAME="${BOARD_SOURCE_DTB_NAME:-k1-x_deb1}"
+BOARD_RUNTIME_DTB_NAME="${BOARD_RUNTIME_DTB_NAME:-k1-x_deb1}"
+BOARD_BOOT_ENV_NAME="${BOARD_BOOT_ENV_NAME:-env_k1-x.txt}"
 KERNEL_MODE="${KERNEL_MODE:-source}"
 UBOOT_MODE="${UBOOT_MODE:-source}"
 KERNEL_SOURCE_DEB="${KERNEL_SOURCE_DEB:-}"
@@ -32,6 +36,9 @@ COLOR_CYAN=$'\033[1;36m'
 COLOR_GREEN=$'\033[1;32m'
 COLOR_YELLOW=$'\033[1;33m'
 COLOR_RED=$'\033[1;31m'
+BUILD_START_EPOCH=0
+declare -a PHASE_NAMES=()
+declare -a PHASE_SECONDS=()
 
 log_info() {
     printf '%s[CONTAINER]%s %s\n' "$COLOR_CYAN" "$COLOR_RESET" "$*"
@@ -48,6 +55,74 @@ log_warn() {
 die() {
     printf '%s[ERR ]%s %s\n' "$COLOR_RED" "$COLOR_RESET" "$*" >&2
     exit 1
+}
+
+format_duration() {
+    local total_millis="${1:-0}"
+    local total_seconds millis hours minutes seconds
+
+    total_seconds=$((total_millis / 1000))
+    millis=$((total_millis % 1000))
+    hours=$((total_seconds / 3600))
+    minutes=$(((total_seconds % 3600) / 60))
+    seconds=$((total_seconds % 60))
+
+    if [[ "$hours" -gt 0 ]]; then
+        printf '%dh %02dm %02d.%03ds' "$hours" "$minutes" "$seconds" "$millis"
+        return
+    fi
+
+    if [[ "$minutes" -gt 0 ]]; then
+        printf '%dm %02d.%03ds' "$minutes" "$seconds" "$millis"
+        return
+    fi
+
+    if [[ "$total_seconds" -gt 0 ]]; then
+        printf '%d.%03ds' "$seconds" "$millis"
+        return
+    fi
+
+    printf '%dms' "$total_millis"
+}
+
+now_millis() {
+    local now
+    now="$(date +%s%3N 2>/dev/null || true)"
+    if [[ -z "$now" || "$now" == *N ]]; then
+        now="$(( $(date +%s) * 1000 ))"
+    fi
+    printf '%s\n' "$now"
+}
+
+record_phase_duration() {
+    PHASE_NAMES+=("$1")
+    PHASE_SECONDS+=("$2")
+}
+
+run_timed_phase() {
+    local label="$1"
+    local start_epoch end_epoch elapsed
+    shift
+
+    start_epoch="$(now_millis)"
+    "$@"
+    end_epoch="$(now_millis)"
+    elapsed=$((end_epoch - start_epoch))
+
+    record_phase_duration "$label" "$elapsed"
+    log_ok "Phase complete: $label ($(format_duration "$elapsed"))"
+}
+
+print_timing_summary() {
+    local total_seconds="$1"
+    local i
+
+    printf '\n'
+    printf '%s[SUMMARY]%s Container build timings\n' "$COLOR_CYAN" "$COLOR_RESET"
+    for ((i = 0; i < ${#PHASE_NAMES[@]}; i++)); do
+        printf '  - %s: %s\n' "${PHASE_NAMES[$i]}" "$(format_duration "${PHASE_SECONDS[$i]}")"
+    done
+    printf '  - Total container build time: %s\n' "$(format_duration "$total_seconds")"
 }
 
 cd "$WORKSPACE"
@@ -154,6 +229,11 @@ validate_build_modes() {
         source|default) ;;
         *) die "Unsupported U-Boot mode: $UBOOT_MODE" ;;
     esac
+
+    [[ -n "$BOARD_PROFILE" ]] || die "BOARD_PROFILE is not set"
+    [[ -n "$BOARD_SOURCE_DTB_NAME" ]] || die "BOARD_SOURCE_DTB_NAME is not set"
+    [[ -n "$BOARD_RUNTIME_DTB_NAME" ]] || die "BOARD_RUNTIME_DTB_NAME is not set"
+    [[ -n "$BOARD_BOOT_ENV_NAME" ]] || die "BOARD_BOOT_ENV_NAME is not set"
 }
 
 compose_package_sets() {
@@ -181,7 +261,7 @@ compose_package_sets() {
     fi
 
     CORE_BOOT_PACKAGES="${packages[*]}"
-    REPAIR_PACKAGES="${CORE_BOOT_PACKAGES} bianbu-minimal bianbu-desktop-lite locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server ffmpeg"
+    REPAIR_PACKAGES="${CORE_BOOT_PACKAGES} bianbu-minimal bianbu-desktop-lite locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server ffmpeg tpm2-tools"
 }
 
 resolve_workspace_path() {
@@ -203,7 +283,7 @@ cleanup_staged_kernel_artifacts() {
         "$TARGET_ROOTFS/boot"/initrd.img-* \
         "$TARGET_ROOTFS/boot"/System.map-* \
         "$TARGET_ROOTFS/boot"/config-* \
-        "$TARGET_ROOTFS/boot"/env_k1-x.txt
+        "$TARGET_ROOTFS/boot/$BOARD_BOOT_ENV_NAME"
 }
 
 cleanup_staged_uboot_artifacts() {
@@ -233,6 +313,36 @@ stage_kernel_dtbs_into_boot() {
     rsync -a --delete "$source_dtb_dir/" "$boot_dtb_dir/"
 }
 
+ensure_runtime_dtb_aliases() {
+    local source_dtb_dir
+    local boot_dtb_dir
+    local source_usr_dtb
+    local runtime_usr_dtb
+    local source_boot_dtb
+    local runtime_boot_dtb
+
+    detect_primary_kernel_version
+    source_dtb_dir="$TARGET_ROOTFS/usr/lib/linux-image-$PRIMARY_KERNEL_VERSION/spacemit"
+    boot_dtb_dir="$TARGET_ROOTFS/boot/spacemit/$PRIMARY_KERNEL_VERSION"
+
+    source_usr_dtb="$source_dtb_dir/$BOARD_SOURCE_DTB_NAME.dtb"
+    source_boot_dtb="$boot_dtb_dir/$BOARD_SOURCE_DTB_NAME.dtb"
+    runtime_usr_dtb="$source_dtb_dir/$BOARD_RUNTIME_DTB_NAME.dtb"
+    runtime_boot_dtb="$boot_dtb_dir/$BOARD_RUNTIME_DTB_NAME.dtb"
+
+    [[ -f "$source_usr_dtb" ]] || die "The selected board source DTB is missing from the staged kernel package: $source_usr_dtb"
+    [[ -f "$source_boot_dtb" ]] || die "The selected board source DTB is missing from the staged /boot tree: $source_boot_dtb"
+
+    if [[ "$BOARD_SOURCE_DTB_NAME" != "$BOARD_RUNTIME_DTB_NAME" ]]; then
+        cp -f "$source_usr_dtb" "$runtime_usr_dtb"
+        cp -f "$source_boot_dtb" "$runtime_boot_dtb"
+        log_ok "Installed board DTB runtime alias $BOARD_RUNTIME_DTB_NAME.dtb from $BOARD_SOURCE_DTB_NAME.dtb"
+        return
+    fi
+
+    log_ok "Board DTB selection uses $BOARD_RUNTIME_DTB_NAME.dtb directly"
+}
+
 apply_kernel_source_deb() {
     local source_deb
     local unpack_dir
@@ -253,6 +363,7 @@ apply_kernel_source_deb() {
 
     detect_primary_kernel_version
     stage_kernel_dtbs_into_boot
+    ensure_runtime_dtb_aliases
     if ! run_in_chroot "depmod '$PRIMARY_KERNEL_VERSION'"; then
         log_warn "depmod did not complete cleanly for the source-built kernel $PRIMARY_KERNEL_VERSION"
     fi
@@ -295,15 +406,15 @@ update_boot_env_txt() {
         dtb_version="$(find "$TARGET_ROOTFS/boot/spacemit" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -n 1)"
     fi
 
-    [[ -n "$dtb_version" ]] || die "Could not determine the DTB directory version for env_k1-x.txt"
+    [[ -n "$dtb_version" ]] || die "Could not determine the DTB directory version for $BOARD_BOOT_ENV_NAME"
 
-    cat >"$TARGET_ROOTFS/boot/env_k1-x.txt" <<EOF
+    cat >"$TARGET_ROOTFS/boot/$BOARD_BOOT_ENV_NAME" <<EOF
 knl_name=vmlinuz-$PRIMARY_KERNEL_VERSION
 ramdisk_name=initrd.img-$PRIMARY_KERNEL_VERSION
 dtb_dir=spacemit/$dtb_version
 EOF
 
-    log_ok "Updated env_k1-x.txt for kernel $PRIMARY_KERNEL_VERSION"
+    log_ok "Updated $BOARD_BOOT_ENV_NAME for kernel $PRIMARY_KERNEL_VERSION"
 }
 
 mount_rootfs() {
@@ -374,6 +485,11 @@ EOF
     printf 'nameserver 8.8.8.8\n' >"$TARGET_ROOTFS/etc/resolv.conf"
 }
 
+prepare_chroot_environment() {
+    mount_rootfs
+    write_bianbu_sources
+}
+
 install_rootfs_packages() {
     log_info "Installing hardware support, desktop packages, and required extras"
 
@@ -393,7 +509,7 @@ install_rootfs_packages() {
         log_warn "bianbu-desktop-lite did not install cleanly under qemu. Deferring repair to first boot."
     fi
 
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server ffmpeg"; then
+    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server ffmpeg tpm2-tools"; then
         PARTIAL_BUILD=1
         log_warn "Customization packages did not install cleanly under qemu. Deferring repair to first boot."
     fi
@@ -509,6 +625,22 @@ configure_users() {
     log_ok "Development accounts configured"
 }
 
+configure_tpm_userspace() {
+    log_info "Configuring TPM userspace access"
+
+    run_in_chroot "getent group tss >/dev/null 2>&1 || groupadd --system tss"
+    run_in_chroot "usermod -aG tss '$DEFAULT_USER' || true"
+
+    mkdir -p "$TARGET_ROOTFS/etc/udev/rules.d"
+    cat >"$TARGET_ROOTFS/etc/udev/rules.d/60-eaie-tpm.rules" <<'EOF'
+# Allow members of the tss group to use TPM character devices.
+KERNEL=="tpm[0-9]*", GROUP="tss", MODE="0660"
+KERNEL=="tpmrm[0-9]*", GROUP="tss", MODE="0660"
+EOF
+
+    log_ok "TPM userspace access is configured"
+}
+
 configure_network() {
     log_info "Configuring NetworkManager netplan for the desktop image"
 
@@ -577,10 +709,11 @@ EOF
 install_display_demo_assets() {
     log_info "Installing the EAIE display-demo assets"
 
-    local wallpaper_source="$WORKSPACE/screen.png"
+    local wallpaper_source="$WORKSPACE/scripts/assets/screen.png"
     local script_source="$WORKSPACE/scripts/run-display-cycle-local.sh"
     local launcher_source="$WORKSPACE/scripts/assets/eaie-display-cycle.desktop"
     local demo_share_dir="$TARGET_ROOTFS/usr/local/share/eaie-display-cycle"
+    local demo_wallpaper_target="/usr/local/share/eaie-display-cycle/screen.png"
     local demo_wallpaper="${demo_share_dir}/screen.png"
     local settings_file="$TARGET_ROOTFS/etc/xdg/pcmanfm-qt/lxqt/settings.conf"
 
@@ -600,7 +733,7 @@ install_display_demo_assets() {
         cat >"$settings_file" <<EOF
 [Desktop]
 DesktopShortcuts=Home, Trash, Computer
-Wallpaper=$demo_wallpaper
+Wallpaper=$demo_wallpaper_target
 WallpaperMode=fit
 WallpaperRandomize=false
 
@@ -613,7 +746,7 @@ Terminal=qterminal
 AlwaysShowTabs=true
 EOF
     else
-        set_ini_key "$settings_file" "Desktop" "Wallpaper" "$demo_wallpaper"
+        set_ini_key "$settings_file" "Desktop" "Wallpaper" "$demo_wallpaper_target"
         set_ini_key "$settings_file" "Desktop" "WallpaperMode" "fit"
         set_ini_key "$settings_file" "Desktop" "WallpaperRandomize" "false"
     fi
@@ -688,6 +821,100 @@ install_rootfs_expand_service() {
     log_ok "First-boot rootfs expansion is enabled"
 }
 
+create_ext4_image_with_progress() {
+    local source_tree="$1"
+    local image_path="$2"
+    local fs_label="$3"
+    local fs_uuid="$4"
+    local fs_size="$5"
+    local inode_count="${6:-}"
+    local source_entries source_size_h
+    local mkfs_cmd=(mkfs.ext4 -F -L "$fs_label" -U "$fs_uuid")
+    local mount_dir=""
+    local mount_succeeded=0
+
+    [[ -d "$source_tree" ]] || die "Source tree for image creation is missing: $source_tree"
+
+    source_entries="$(find "$source_tree" -mindepth 1 | wc -l | tr -d ' ')"
+    source_size_h="$(du -sh "$source_tree" | awk '{print $1}')"
+
+    log_info "Creating $image_path from $source_entries entries (${source_size_h})"
+
+    rm -f "$image_path"
+
+    if [[ -n "$inode_count" ]]; then
+        mkfs_cmd+=(-N "$inode_count")
+    fi
+    mkfs_cmd+=("$image_path" "$fs_size")
+
+    if "${mkfs_cmd[@]}"; then
+        mount_dir="$(mktemp -d)"
+        if mount -o loop "$image_path" "$mount_dir" 2>/dev/null; then
+            mount_succeeded=1
+            if rsync -aHAX --numeric-ids --info=progress2 "$source_tree/" "$mount_dir/"; then
+                sync
+                umount "$mount_dir"
+                mount_succeeded=0
+                rmdir "$mount_dir"
+                return
+            fi
+
+            log_warn "Progress copy into $image_path failed; falling back to mke2fs -d"
+            umount "$mount_dir" || true
+            mount_succeeded=0
+        else
+            log_warn "Loop-mount population is unavailable; falling back to mke2fs -d for $image_path"
+        fi
+
+        [[ -n "$mount_dir" ]] && rmdir "$mount_dir" 2>/dev/null || true
+    fi
+
+    if [[ "$mount_succeeded" -eq 1 && -n "$mount_dir" ]]; then
+        umount "$mount_dir" || true
+        rmdir "$mount_dir" 2>/dev/null || true
+    fi
+
+    rm -f "$image_path"
+    mkfs_cmd=(mke2fs -d "$source_tree" -L "$fs_label" -t ext4 -U "$fs_uuid")
+    if [[ -n "$inode_count" ]]; then
+        mkfs_cmd+=(-N "$inode_count")
+    fi
+    mkfs_cmd+=("$image_path" "$fs_size")
+
+    "${mkfs_cmd[@]}"
+}
+
+image_contains_path() {
+    local image_path="$1"
+    local required_path="$2"
+
+    debugfs -R "stat ${required_path}" "$image_path" >/dev/null 2>&1
+}
+
+verify_generated_partition_images() {
+    local runtime_dtb_path="/spacemit/${PRIMARY_KERNEL_VERSION}/${BOARD_RUNTIME_DTB_NAME}.dtb"
+
+    log_info "Validating generated partition images"
+
+    [[ -n "$PRIMARY_KERNEL_VERSION" ]] || die "Primary kernel version is not known; cannot validate generated images."
+
+    image_contains_path "bootfs.ext4" "/${BOARD_BOOT_ENV_NAME}" \
+        || die "Generated bootfs.ext4 is missing /${BOARD_BOOT_ENV_NAME}"
+    image_contains_path "bootfs.ext4" "/vmlinuz-${PRIMARY_KERNEL_VERSION}" \
+        || die "Generated bootfs.ext4 is missing /vmlinuz-${PRIMARY_KERNEL_VERSION}"
+    image_contains_path "bootfs.ext4" "/initrd.img-${PRIMARY_KERNEL_VERSION}" \
+        || die "Generated bootfs.ext4 is missing /initrd.img-${PRIMARY_KERNEL_VERSION}"
+    image_contains_path "bootfs.ext4" "$runtime_dtb_path" \
+        || die "Generated bootfs.ext4 is missing ${runtime_dtb_path}"
+
+    image_contains_path "rootfs.ext4" "/etc/os-release" \
+        || die "Generated rootfs.ext4 is missing /etc/os-release"
+    image_contains_path "rootfs.ext4" "/usr/lib/u-boot/spacemit/u-boot.itb" \
+        || die "Generated rootfs.ext4 is missing /usr/lib/u-boot/spacemit/u-boot.itb"
+
+    log_ok "Generated bootfs.ext4 and rootfs.ext4 passed sanity validation"
+}
+
 prepare_fstab_and_partition_images() {
     log_info "Preparing bootfs/rootfs partition images"
 
@@ -715,8 +942,9 @@ EOF
     fi
 
     rm -f bootfs.ext4 rootfs.ext4
-    mke2fs -d "$TARGET_BOOTFS" -L bootfs -t ext4 -U "$uuid_bootfs" bootfs.ext4 "256M"
-    mke2fs -d "$TARGET_ROOTFS" -L rootfs -t ext4 -N 524288 -U "$uuid_rootfs" rootfs.ext4 "$ROOTFS_SIZE"
+    create_ext4_image_with_progress "$TARGET_BOOTFS" "bootfs.ext4" "bootfs" "$uuid_bootfs" "256M"
+    create_ext4_image_with_progress "$TARGET_ROOTFS" "rootfs.ext4" "rootfs" "$uuid_rootfs" "$ROOTFS_SIZE" "524288"
+    verify_generated_partition_images
 
     log_ok "bootfs.ext4 and rootfs.ext4 were generated"
 }
@@ -765,13 +993,19 @@ prepare_pack_dir() {
 }
 
 package_titan_zip() {
-    log_info "Packaging Titan flash zip"
-    rm -f "${IMAGE_PREFIX}.zip"
+    local pack_entries pack_size_h archive_name
+    archive_name="${IMAGE_PREFIX}.zip"
+    log_info "Packaging ${COLOR_YELLOW}${archive_name}${COLOR_RESET}"
+    pack_entries="$(find "$PACK_DIR" -mindepth 1 | wc -l | tr -d ' ')"
+    pack_size_h="$(du -sh "$PACK_DIR" | awk '{print $1}')"
+    log_info "Creating ${COLOR_YELLOW}${archive_name}${COLOR_RESET} from $pack_entries entries (${pack_size_h})"
+    rm -f "$archive_name"
     (
         cd "$PACK_DIR"
-        zip -rq "../${IMAGE_PREFIX}.zip" .
+        zip -r -dg -db "../${archive_name}" .
     )
-    log_ok "${IMAGE_PREFIX}.zip created"
+    [[ -f "$archive_name" ]] || die "Expected ${archive_name} was not created"
+    log_ok "${archive_name} created"
 }
 
 package_sdcard_image() {
@@ -808,31 +1042,37 @@ cleanup_rootfs_caches() {
     run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get clean"
 }
 
-main() {
-    validate_build_modes
-    compose_package_sets
-    install_container_tools
-    prepare_rootfs_tree
-    mount_rootfs
-    write_bianbu_sources
-    install_rootfs_packages
-    repair_and_validate_packages
-    apply_source_package_overlays
-    configure_locale_timezone
-    configure_users
-    configure_network
-    configure_ssh
-    configure_sddm_autologin
-    install_display_demo_assets
-    install_firstboot_repair_service
-    install_rootfs_expand_service
-    generate_initramfs_images
+finalize_rootfs_for_packaging() {
     cleanup_rootfs_caches
     umount_rootfs
     prepare_fstab_and_partition_images
-    prepare_pack_dir
-    package_titan_zip
-    package_sdcard_image
+}
+
+main() {
+    BUILD_START_EPOCH="$(now_millis)"
+    validate_build_modes
+    compose_package_sets
+    run_timed_phase "Install container build tools" install_container_tools
+    run_timed_phase "Prepare rootfs staging tree" prepare_rootfs_tree
+    run_timed_phase "Mount rootfs and configure apt sources" prepare_chroot_environment
+    run_timed_phase "Install rootfs packages" install_rootfs_packages
+    run_timed_phase "Repair and validate package state" repair_and_validate_packages
+    run_timed_phase "Apply source-built BSP overlays" apply_source_package_overlays
+    run_timed_phase "Configure locale and timezone" configure_locale_timezone
+    run_timed_phase "Configure development users" configure_users
+    run_timed_phase "Configure TPM userspace access" configure_tpm_userspace
+    run_timed_phase "Configure NetworkManager" configure_network
+    run_timed_phase "Enable SSH" configure_ssh
+    run_timed_phase "Configure LXQt Wayland autologin" configure_sddm_autologin
+    run_timed_phase "Install display-demo assets" install_display_demo_assets
+    run_timed_phase "Install first-boot repair service" install_firstboot_repair_service
+    run_timed_phase "Install rootfs auto-expand service" install_rootfs_expand_service
+    run_timed_phase "Generate initramfs images" generate_initramfs_images
+    run_timed_phase "Finalize rootfs and generate ext4 images" finalize_rootfs_for_packaging
+    run_timed_phase "Prepare packaging inputs" prepare_pack_dir
+    run_timed_phase "Package Titan flash zip" package_titan_zip
+    run_timed_phase "Package SD card image" package_sdcard_image
+    print_timing_summary "$(( $(now_millis) - BUILD_START_EPOCH ))"
 }
 
 main "$@"

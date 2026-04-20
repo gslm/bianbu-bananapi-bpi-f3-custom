@@ -1,0 +1,32 @@
+# Local editor and Codex state
+.codex
+.vscode/
+.vscode-ctags
+
+# Generated build state and artifacts
+.bianbu-build/
+bootfs/
+rootfs/
+pack_dir/
+bootfs.ext4
+rootfs.ext4
+bianbu-custom.sdcard
+bianbu-custom.zip
+
+# Downloaded build inputs
+bianbu-base-*.tar.gz
+qemu-user-static_*.deb
+
+# Source checkouts, toolchains, and source-built packages are external inputs
+sources/
+rvv
+
+# Local lab captures and generated caches
+logs/
+__pycache__/
+scripts/__pycache__/
+
+# Generic generated Debian artifacts
+*.buildinfo
+*.changes
+*.deb

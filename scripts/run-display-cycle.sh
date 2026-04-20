@@ -8,7 +8,7 @@ BOARD_HOST="192.168.28.85"
 BOARD_USER="eaie"
 BOARD_PASS="eaie"
 
-LOCAL_WALLPAPER="$ROOT_DIR/screen.png"
+LOCAL_WALLPAPER="$ROOT_DIR/scripts/assets/screen.png"
 REMOTE_DIR="/home/${BOARD_USER}/.local/share/eaie-display-cycle"
 REMOTE_WALLPAPER=""
 
@@ -22,7 +22,7 @@ CAMERA_SIZE="1280x720"
 CAMERA_FORMAT="mjpeg"
 SCREEN_SIZE="1024x600"
 WAYLAND_DISPLAY="wayland-0"
-RUNTIME_DIR="/run/user/1000"
+RUNTIME_DIR=""
 WALLPAPER_MODE="fit"
 RUN_ONCE=0
 
@@ -42,14 +42,14 @@ Runs a repeating display-demo loop on the Bianbu board over SSH:
 2. Fullscreen test-pattern "screensaver" for 30 seconds
 3. Normal LXQt desktop with wallpaper for 30 seconds
 
-The script copies screen.png from this repo to the board, sets it as the LXQt
+The script copies scripts/assets/screen.png from this repo to the board, sets it as the LXQt
 wallpaper, and then starts the loop in the live Wayland session.
 
 Options:
   --host <addr>                  Board IP or hostname. Default: 192.168.28.85
   --user <name>                  SSH username. Default: eaie
   --password <pass>              SSH password. Default: eaie
-  --wallpaper <file>             Local wallpaper path. Default: ./screen.png
+  --wallpaper <file>             Local wallpaper path. Default: ./scripts/assets/screen.png
   --camera-device <path>         Preferred remote V4L2 device or symlink.
   --camera-seconds <n>           Camera phase length. Default: 60
   --screensaver-seconds <n>      Test-pattern phase length. Default: 30
@@ -58,7 +58,7 @@ Options:
   --camera-format <name>         Camera input format. Default: mjpeg
   --screen-size <WxH>            Screensaver pattern size. Default: 1024x600
   --wayland-display <name>       Remote Wayland display. Default: wayland-0
-  --runtime-dir <path>           Remote XDG runtime dir. Default: /run/user/1000
+  --runtime-dir <path>           Remote XDG runtime dir. Default: auto (/run/user/<remote uid>)
   --wallpaper-mode <mode>        pcmanfm-qt wallpaper mode. Default: fit
   --once                         Run one cycle only, then exit.
   --help                         Show this help text.
@@ -207,7 +207,12 @@ validate_inputs() {
 }
 
 prepare_remote_assets() {
-    REMOTE_DIR="/home/${BOARD_USER}/.local/share/eaie-display-cycle"
+    local remote_home
+
+    remote_home="$(ssh_base 'printf "%s\n" "$HOME"')"
+    [[ -n "$remote_home" ]] || die "Could not determine the remote home directory for ${BOARD_USER}@${BOARD_HOST}"
+
+    REMOTE_DIR="${remote_home}/.local/share/eaie-display-cycle"
     REMOTE_WALLPAPER="${REMOTE_DIR}/$(basename "$LOCAL_WALLPAPER")"
 
     log_info "Preparing remote wallpaper directory on ${BOARD_USER}@${BOARD_HOST}"
@@ -264,6 +269,10 @@ WAYLAND_DISPLAY="${11}"
 RUNTIME_DIR="${12}"
 WALLPAPER_MODE="${13}"
 RUN_ONCE="${14}"
+
+if [[ -z "$RUNTIME_DIR" ]]; then
+    RUNTIME_DIR="/run/user/$(id -u)"
+fi
 
 current_pid=""
 

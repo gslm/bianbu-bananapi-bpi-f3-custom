@@ -58,7 +58,7 @@ if ! id -u "$DEFAULT_USER" >/dev/null 2>&1; then
 fi
 echo "${DEFAULT_USER}:${DEFAULT_PASSWORD}" | chpasswd
 
-for group in adm audio cdrom dialout dip input lpadmin netdev plugdev render sudo users video; do
+for group in adm audio cdrom dialout dip input lpadmin netdev plugdev render sudo tss users video; do
     if getent group "$group" >/dev/null 2>&1; then
         usermod -aG "$group" "$DEFAULT_USER"
     fi

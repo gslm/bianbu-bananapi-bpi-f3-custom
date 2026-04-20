@@ -8,6 +8,8 @@ FASTBOOT_BIN="${FASTBOOT_BIN:-fastboot}"
 
 WAIT_TIMEOUT=30
 BOOTFS_ONLY=0
+UBOOT_ONLY=0
+LOW_IMPACT=0
 MANUAL_RESET_REQUIRED=0
 
 UDEV_RULE_PATH="/etc/udev/rules.d/99-bianbu-dfu.rules"
@@ -22,7 +24,7 @@ COLOR_MAGENTA=$'\033[1;35m'
 
 usage() {
     cat <<'EOF'
-Usage: sudo scripts/eaie_flash.sh [--bootfs-only] [--help]
+Usage: sudo scripts/eaie_flash.sh [--bootfs-only] [--uboot-only] [--low-impact] [--help]
 
 Flash the generated Bianbu image package to BPI-F3 eMMC using fastboot.
 
@@ -36,10 +38,17 @@ The script:
 Options:
   --bootfs-only     Reflash only the bootfs partition. Useful after regenerating
                     initrd and bootfs.ext4 without changing rootfs.
+  --uboot-only      Reflash only the uboot partition from pack_dir/u-boot.itb.
+                    Useful after rebuilding U-Boot or changing the bundled
+                    U-Boot DTB without changing bootfs/rootfs.
+  --low-impact      Run fastboot at low CPU and disk priority to reduce host
+                    desktop contention during long flash steps such as rootfs.
   --help            Show this help text.
 
 Environment:
   FASTBOOT_BIN      Override the fastboot binary to use.
+  FLASH_LOW_IMPACT  Set to yes to enable the same low-impact mode as
+                    --low-impact.
 EOF
 }
 
@@ -84,6 +93,12 @@ parse_args() {
             --bootfs-only)
                 BOOTFS_ONLY=1
                 ;;
+            --uboot-only)
+                UBOOT_ONLY=1
+                ;;
+            --low-impact)
+                LOW_IMPACT=1
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -108,14 +123,25 @@ require_tools() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         die "Missing required host tools: ${missing[*]}"
     fi
+
+    if [[ "$LOW_IMPACT" -eq 1 ]]; then
+        command -v nice >/dev/null 2>&1 || die "Missing required host tool for --low-impact: nice"
+        command -v ionice >/dev/null 2>&1 || die "Missing required host tool for --low-impact: ionice"
+    fi
 }
 
 validate_pack_dir() {
     log_info "Validating eMMC flashing inputs in $PACK_DIR"
 
-    local required=("$PACK_DIR/bootfs.ext4")
+    local required=()
 
-    if [[ "$BOOTFS_ONLY" -eq 0 ]]; then
+    if [[ "$UBOOT_ONLY" -eq 1 ]]; then
+        required+=("$PACK_DIR/u-boot.itb")
+    else
+        required+=("$PACK_DIR/bootfs.ext4")
+    fi
+
+    if [[ "$BOOTFS_ONLY" -eq 0 && "$UBOOT_ONLY" -eq 0 ]]; then
         required+=(
             "$PACK_DIR/partition_universal.json"
             "$PACK_DIR/factory/bootinfo_emmc.bin"
@@ -191,6 +217,12 @@ fastboot_wait_for_device() {
 }
 
 run_fastboot() {
+    if [[ "$LOW_IMPACT" -eq 1 ]]; then
+        log_step "Running at low impact: nice -n 19 ionice -c3 $FASTBOOT_BIN $*"
+        run_as_root nice -n 19 ionice -c3 "$FASTBOOT_BIN" "$@"
+        return
+    fi
+
     log_step "Running: $FASTBOOT_BIN $*"
     run_as_root "$FASTBOOT_BIN" "$@"
 }
@@ -230,6 +262,14 @@ flash_emmc() {
         return
     fi
 
+    if [[ "$UBOOT_ONLY" -eq 1 ]]; then
+        log_info "Reflashing only the uboot partition"
+        run_fastboot flash uboot u-boot.itb
+        request_boot_after_flash
+        log_ok "uboot-only flashing completed"
+        return
+    fi
+
     log_info "Starting the eMMC flashing sequence"
 
     run_fastboot stage factory/FSBL.bin
@@ -260,6 +300,8 @@ print_summary() {
     printf '\n'
     if [[ "$BOOTFS_ONLY" -eq 1 ]]; then
         printf 'Only the bootfs partition was reflashed.\n'
+    elif [[ "$UBOOT_ONLY" -eq 1 ]]; then
+        printf 'Only the uboot partition was reflashed.\n'
     else
         printf 'The board should now boot from eMMC with the SD card removed.\n'
     fi
@@ -269,8 +311,17 @@ print_summary() {
 }
 
 main() {
+    if [[ "${FLASH_LOW_IMPACT:-}" =~ ^([Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|1)$ ]]; then
+        LOW_IMPACT=1
+    fi
     parse_args "$@"
+    if [[ "$BOOTFS_ONLY" -eq 1 && "$UBOOT_ONLY" -eq 1 ]]; then
+        die "--bootfs-only and --uboot-only are mutually exclusive"
+    fi
     require_tools
+    if [[ "$LOW_IMPACT" -eq 1 ]]; then
+        log_info "Low-impact flashing is enabled; fastboot will run with nice + ionice"
+    fi
     validate_pack_dir
     install_udev_rule
     prompt_fdl

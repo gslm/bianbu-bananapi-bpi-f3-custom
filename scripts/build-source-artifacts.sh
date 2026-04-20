@@ -9,6 +9,8 @@ ARTIFACT_ENV_FILE="${ARTIFACT_ENV_FILE:-$STATE_DIR/source-artifacts.env}"
 
 KERNEL_MODE="${KERNEL_MODE:-source}"
 UBOOT_MODE="${UBOOT_MODE:-source}"
+KERNEL_REBUILD="${KERNEL_REBUILD:-no}"
+UBOOT_REBUILD="${UBOOT_REBUILD:-no}"
 
 KERNEL_SOURCE_URL="${KERNEL_SOURCE_URL:-https://gitee.com/bianbu-linux/linux-6.6.git}"
 KERNEL_SOURCE_REF="${KERNEL_SOURCE_REF:-}"
@@ -68,7 +70,9 @@ Source mode behavior:
 - reuses an existing source checkout if present
 - clones the source tree only when missing
 - downloads and reuses the SpacemiT cross toolchain under sources/toolchains/
-- builds Debian packages from source
+- rebuilds Debian packages from source only when KERNEL_REBUILD=yes and/or
+  UBOOT_REBUILD=yes
+- otherwise reuses the latest existing source-built Debian packages
 
 Default mode behavior:
 
@@ -80,12 +84,26 @@ Environment overrides:
   KERNEL_SOURCE_REF
   UBOOT_SOURCE_URL
   UBOOT_SOURCE_REF
+  KERNEL_REBUILD
+  UBOOT_REBUILD
   TOOLCHAIN_URL
   TOOLCHAIN_VERSION
   TOOLCHAIN_DIR
   CROSS_COMPILE_PREFIX
   MAKE_JOBS
 EOF
+}
+
+format_source_with_ref() {
+    local url="$1"
+    local ref="${2:-}"
+
+    if [[ -n "$ref" ]]; then
+        printf '%s @ %s\n' "$url" "$ref"
+        return
+    fi
+
+    printf '%s\n' "$url"
 }
 
 parse_args() {
@@ -122,6 +140,23 @@ validate_modes() {
     case "$UBOOT_MODE" in
         source|default) ;;
         *) die "Unsupported U-Boot mode: $UBOOT_MODE" ;;
+    esac
+}
+
+normalize_yes_no() {
+    local value="${1:-}"
+    local setting_name="$2"
+
+    case "${value,,}" in
+        yes|true|1)
+            printf 'yes\n'
+            ;;
+        no|false|0|'')
+            printf 'no\n'
+            ;;
+        *)
+            die "$setting_name must be yes or no, got: $value"
+            ;;
     esac
 }
 
@@ -223,6 +258,24 @@ build_kernel_source_package() {
     log_ok "Kernel package ready: $KERNEL_SOURCE_DEB"
 }
 
+reuse_kernel_source_package() {
+    local package_dir="$SOURCES_DIR/kernel"
+    local latest_deb=""
+
+    latest_deb="$(
+        find "$package_dir" -maxdepth 1 -type f -name 'linux-image-*.deb' ! -name 'linux-image-*-dbg_*.deb' \
+            -printf '%T@ %p\n' \
+            | sort -nr \
+            | head -n 1 \
+            | cut -d' ' -f2-
+    )"
+
+    [[ -n "$latest_deb" ]] || die "KERNEL_REBUILD=no but no cached kernel package was found under $package_dir. Re-run with KERNEL_REBUILD=yes."
+
+    KERNEL_SOURCE_DEB="$(relpath_from_root "$latest_deb")"
+    log_ok "Reusing existing kernel package: $KERNEL_SOURCE_DEB"
+}
+
 prepare_uboot_changelog() {
     local source_dir="$1"
     local version
@@ -271,6 +324,17 @@ build_uboot_source_package() {
     log_ok "U-Boot package ready: $UBOOT_SOURCE_DEB"
 }
 
+reuse_uboot_source_package() {
+    local package_dir="$SOURCES_DIR/u-boot"
+    local latest_deb=""
+
+    latest_deb="$(find_latest_file "$package_dir" 'u-boot-spacemit*.deb')"
+    [[ -n "$latest_deb" ]] || die "UBOOT_REBUILD=no but no cached U-Boot package was found under $package_dir. Re-run with UBOOT_REBUILD=yes."
+
+    UBOOT_SOURCE_DEB="$(relpath_from_root "$latest_deb")"
+    log_ok "Reusing existing U-Boot package: $UBOOT_SOURCE_DEB"
+}
+
 write_artifact_env_file() {
     mkdir -p "$STATE_DIR"
     cat >"$ARTIFACT_ENV_FILE" <<EOF
@@ -286,19 +350,38 @@ EOF
 main() {
     parse_args "$@"
     validate_modes
+    KERNEL_REBUILD="$(normalize_yes_no "$KERNEL_REBUILD" "KERNEL_REBUILD")"
+    UBOOT_REBUILD="$(normalize_yes_no "$UBOOT_REBUILD" "UBOOT_REBUILD")"
 
     mkdir -p "$SOURCES_DIR/kernel" "$SOURCES_DIR/u-boot"
 
-    if [[ "$KERNEL_MODE" == "source" || "$UBOOT_MODE" == "source" ]]; then
+    if [[ "$KERNEL_MODE" == "source" ]]; then
+        log_info "Kernel source remote: $(format_source_with_ref "$KERNEL_SOURCE_URL" "$KERNEL_SOURCE_REF")"
+    fi
+
+    if [[ "$UBOOT_MODE" == "source" ]]; then
+        log_info "U-Boot source remote: $(format_source_with_ref "$UBOOT_SOURCE_URL" "$UBOOT_SOURCE_REF")"
+    fi
+
+    if [[ "$KERNEL_MODE" == "source" && "$KERNEL_REBUILD" == "yes" ]] \
+        || [[ "$UBOOT_MODE" == "source" && "$UBOOT_REBUILD" == "yes" ]]; then
         ensure_toolchain
     fi
 
     if [[ "$KERNEL_MODE" == "source" ]]; then
-        build_kernel_source_package
+        if [[ "$KERNEL_REBUILD" == "yes" ]]; then
+            build_kernel_source_package
+        else
+            reuse_kernel_source_package
+        fi
     fi
 
     if [[ "$UBOOT_MODE" == "source" ]]; then
-        build_uboot_source_package
+        if [[ "$UBOOT_REBUILD" == "yes" ]]; then
+            build_uboot_source_package
+        else
+            reuse_uboot_source_package
+        fi
     fi
 
     write_artifact_env_file
