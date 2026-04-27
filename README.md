@@ -90,13 +90,17 @@ The current image build is configured for:
 - `root` password `eaie`
 - SDDM autologin into `lxqt-wayland`
 - `xterm`, `net-tools`, `qt6-wayland`, `cloud-guest-utils`,
-  `openssh-server`, `ffmpeg`, and `tpm2-tools` baked into the image
+  `openssh-server`, `ffmpeg`, `tpm2-tools`, and the YOLOv8 runtime stack baked
+  into the image
+- YOLOv8 runtime packages:
+  `python3-numpy`, `python3-opencv`, `onnxruntime`, and
+  `python3-spacemit-ort`
 - TPM character-device access prepared through a `tss` group and udev rules
 - SSH enabled by default, with development-only password login for both
   `eaie` and `root`
 - an `8192M` rootfs image plus first-boot auto-expand
 - an explicit `initrd.img-*` generation step before `bootfs.ext4` is packaged
-- a first-boot native repair path if qemu leaves the rootfs in a partial state
+- a dormant first-boot native repair helper retained for manual recovery work
 - the repo wallpaper [screen.png](scripts/assets/screen.png) installed into
   `/usr/local/share/eaie-display-cycle/screen.png`
 - the board-local demo runner installed as `/usr/local/bin/eaie-display-cycle`
@@ -145,11 +149,11 @@ creation and regenerated uniquely on first boot before `ssh.service` starts.
 
 If the container build completes cleanly, the image boots normally.
 
-If the container build hits the known qemu/riscv64 package-install problem, the
-automation can package a provisional image as long as the required bootloader
-and kernel artifacts were installed. On first boot, the board runs
-`eaie-firstboot-repair.service`, repairs the package state natively, applies
-the final locale/timezone/runtime package configuration, and then reboots once.
+Partial rootfs builds are not allowed. If package installation, package repair,
+or required-runtime validation fails, the build aborts and the flashable
+artifacts must be treated as invalid. The required runtime validation includes
+the desktop profile, NetworkManager, SDDM, LXQt Wayland, SSH, rootfs expansion
+tools, TPM userspace tools, and the YOLOv8 Python/NPU runtime.
 
 Boot-critical note:
 
@@ -168,6 +172,53 @@ The build writes these files at the repository root:
 - [bootfs.ext4](bootfs.ext4)
 - [rootfs.ext4](rootfs.ext4)
 
+Each run also writes a full build log under `.bianbu-build/logs/` and updates
+`.bianbu-build/logs/latest.log` to point at the newest log. Inspect that log
+before flashing a new image.
+
+### Adding Packages And Applications To The Image
+
+Most image content is assembled in
+[scripts/build-rootfs-in-container.sh](scripts/build-rootfs-in-container.sh).
+Use that file as the source of truth for rootfs package and application
+customization.
+
+For Debian packages from the configured Bianbu/Ubuntu repositories:
+
+- Add the package to `install_rootfs_packages()` in the appropriate
+  `apt_install_chroot` call.
+- If the package is required for a valid image, add it to
+  `validate_required_runtime()` so the build fails instead of producing a
+  partial image.
+- If the package must be visible in the final `rootfs.ext4`, add a stable file
+  path to `verify_generated_partition_images()`.
+- If the package has mutually incompatible variants, document the selected
+  package and avoid installing the conflicting one. Example: use
+  `python3-spacemit-ort` for the SpacemiT NPU ONNXRuntime stack and do not add
+  the generic `python3-onnxruntime` package.
+
+For files or scripts maintained by this repository:
+
+- Put static inputs under [scripts/assets/](scripts/assets/).
+- Add or extend an installer function in
+  `scripts/build-rootfs-in-container.sh`, such as `install_display_demo_assets()`
+  or a new narrowly named function.
+- Call that installer from `main()` through `run_timed_phase` so it appears in
+  the build timing summary.
+- Validate installed files either in the installer function itself or in
+  `verify_generated_partition_images()` if the file must be present in the
+  generated ext4 image.
+
+For board-local test/demo applications:
+
+- Prefer packaging prerequisites into the image, but keep experimental demo
+  source payloads out of the base image until they are part of the product
+  profile.
+- Deploy temporary demo files over SSH during evaluation.
+- Once a demo becomes part of the image, move its source files under
+  `scripts/assets/` or a dedicated tracked directory and install them from a
+  timed build phase.
+
 Source workflow side effects:
 
 - source checkouts live under `sources/`
@@ -176,6 +227,8 @@ Source workflow side effects:
 - the downloaded cross toolchain is kept under `sources/toolchains/`
 - `FULL_CLEAN=yes` preserves source checkouts and the extracted toolchain, but
   removes the generated `.deb` build outputs and regular image staging state
+- `FULL_CLEAN=yes` preserves `.bianbu-build/logs/` so failed rebuilds remain
+  diagnosable
 
 ## Board Profile Model
 
@@ -260,6 +313,12 @@ Full clean rebuild:
 
 ```bash
 bash scripts/build-bianbu.sh FULL_CLEAN=yes
+```
+
+After a build, inspect the latest log before flashing:
+
+```bash
+less .bianbu-build/logs/latest.log
 ```
 
 ## Fast Deployment
@@ -368,6 +427,44 @@ The bootfs-only recovery helper is:
 
 - [scripts/repair-bootfs-initrd.sh](scripts/repair-bootfs-initrd.sh)
 
+### Fastboot Client
+
+Prefer the newer Google platform-tools `fastboot` client for this board. The
+distro `fastboot` package can detect the device, but it has previously hung
+during `fastboot stage` on this workflow.
+
+Known-good local layout:
+
+```text
+$HOME/platform-tools/fastboot
+```
+
+This repository does not vendor Google platform-tools. Each developer should
+install or unpack a recent platform-tools bundle locally so the binary is
+available at the path above. If the bundle was extracted somewhere else, either
+move it into `$HOME/platform-tools` or pass its `fastboot` path through
+`FASTBOOT_BIN`.
+
+Minimal local layout check:
+
+```bash
+test -x "$HOME/platform-tools/fastboot"
+```
+
+Check the active clients:
+
+```bash
+/usr/bin/fastboot --version
+"$HOME/platform-tools/fastboot" --version
+```
+
+The flash script uses the system `fastboot` by default. Override it with
+`FASTBOOT_BIN` whenever the local platform-tools client is available:
+
+```bash
+sudo env FASTBOOT_BIN="$HOME/platform-tools/fastboot" bash scripts/eaie_flash.sh
+```
+
 ### Standard Flash Command
 
 From the repository root:
@@ -376,12 +473,14 @@ From the repository root:
 sudo bash scripts/eaie_flash.sh
 ```
 
-On hosts where distro `fastboot` hangs during `fastboot stage`, use the working
-Google platform-tools client:
+Recommended command when the local Google platform-tools client is available:
 
 ```bash
 sudo env FASTBOOT_BIN="$HOME/platform-tools/fastboot" bash scripts/eaie_flash.sh
 ```
+
+Use this command by default for full eMMC flashes. Only use the distro
+`/usr/bin/fastboot` path when the local platform-tools client is unavailable.
 
 If a full `rootfs` flash makes the development machine sluggish, use the
 low-impact mode so `fastboot` runs at lower CPU and disk priority:
@@ -571,6 +670,61 @@ The lab-only helper
 was used to prove that the module responds over raw SPI. It requires a
 temporary spidev DTS/config setup and is not part of the production TPM path.
 
+### MPU6050 IMU Bring-Up
+
+The current lab bring-up DTS enables a temporary MPU6050 accelerometer/gyroscope
+module on the external-header I2C bus. This is not the final production IMU; the
+final EAIE hardware is expected to use an `LSM6DSO32TR`, which will need a
+follow-up DTS and kernel-config change.
+
+Current lab wiring:
+
+- `AP_I2C4_SDA_3V3` / `AP_I2C4_SCL_3V3` for I2C
+- I2C address `0x68`
+- `GPIO_71_3v3`, physical header pin 11, for the optional interrupt line
+
+Current kernel/DTS implementation:
+
+- [k1-x_eaie-v1-riscv-spacemitk1.dts](sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_eaie-v1-riscv-spacemitk1.dts)
+  enables the `imu@68` node under the active `i2c4` controller
+- [k1_defconfig](sources/kernel/linux-6.6/arch/riscv/configs/k1_defconfig)
+  enables `CONFIG_INV_MPU6050_IIO` and `CONFIG_INV_MPU6050_I2C`
+
+Validated board-side checks:
+
+```bash
+cat /proc/device-tree/model && echo
+find /proc/device-tree/soc/i2c@d4012800 -maxdepth 2 -print | grep 'imu@68'
+sudo i2cget -y 4 0x68 0x75
+ls -l /sys/bus/i2c/devices/4-0068/driver
+for d in /sys/bus/iio/devices/iio:device*; do
+  echo "== $d =="
+  cat "$d/name"
+done
+```
+
+Expected validation indicators:
+
+```text
+eaie-v1-riscv-spacemitk1
+/proc/device-tree/soc/i2c@d4012800/imu@68
+0x68
+4-0068/driver -> .../inv-mpu6050-i2c
+mpu6050
+```
+
+Useful raw sensor checks:
+
+```bash
+D=/sys/bus/iio/devices/iio:device1
+cat "$D/in_accel_x_raw"
+cat "$D/in_accel_y_raw"
+cat "$D/in_accel_z_raw"
+cat "$D/in_anglvel_x_raw"
+cat "$D/in_anglvel_y_raw"
+cat "$D/in_anglvel_z_raw"
+```
+
 ### Current Runtime DTB Path
 
 The staged runtime DTB currently lives under:
@@ -661,10 +815,16 @@ When those appear, check:
 - Evaluate when the stock U-Boot compatibility alias is no longer sufficient
   and introduce EAIE-specific U-Boot changes at that point.
 - Model TPM reset and IRQ GPIOs after the hardware wiring is finalized.
+- Replace the temporary MPU6050 lab IMU node with the production
+  `LSM6DSO32TR` IMU when the final hardware design is ready.
 - Expand the kernel changes tutorial as more DTS, driver, and kernel-config
   work lands in this repo.
 - Use the new timing and progress reporting to identify the slowest build
   phases and optimize them.
+- Split the kernel workflow into separate full-package and fast-iteration
+  paths: keep Debian package generation for reproducible image builds, but add
+  a lightweight kernel/DTB/module build path for live board bring-up without
+  rebuilding all kernel Debian packages.
 - Move the full build flow into a Docker-contained workflow so the entire build
   environment is containerized.
 - Once the custom kernel and rootfs workspaces are the primary development
