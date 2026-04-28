@@ -30,8 +30,8 @@ if [[ "$ROOT_DEV" != /dev/* ]]; then
     exit 1
 fi
 
-ROOT_DISK_NAME="$(lsblk -no PKNAME "$ROOT_DEV" | head -n1)"
-ROOT_PART_NUMBER="$(lsblk -no PARTN "$ROOT_DEV" | head -n1)"
+ROOT_DISK_NAME="$(lsblk -no PKNAME "$ROOT_DEV" | head -n1 | tr -d '[:space:]')"
+ROOT_PART_NUMBER="$(lsblk -no PARTN "$ROOT_DEV" | head -n1 | tr -d '[:space:]')"
 
 if [[ -z "$ROOT_DISK_NAME" || -z "$ROOT_PART_NUMBER" ]]; then
     echo "expand-rootfs: unable to resolve disk and partition for $ROOT_DEV" >&2
@@ -40,9 +40,14 @@ fi
 
 ROOT_DISK="/dev/${ROOT_DISK_NAME}"
 
-growpart "$ROOT_DISK" "$ROOT_PART_NUMBER" || {
-    echo "expand-rootfs: growpart failed for $ROOT_DISK partition $ROOT_PART_NUMBER" >&2
-    exit 1
+GROWPART_OUTPUT="$(growpart "$ROOT_DISK" "$ROOT_PART_NUMBER" 2>&1)" || {
+    if grep -q '^NOCHANGE:' <<<"$GROWPART_OUTPUT"; then
+        echo "$GROWPART_OUTPUT"
+    else
+        echo "$GROWPART_OUTPUT" >&2
+        echo "expand-rootfs: growpart failed for $ROOT_DISK partition $ROOT_PART_NUMBER" >&2
+        exit 1
+    fi
 }
 
 partprobe "$ROOT_DISK" || true
@@ -51,4 +56,3 @@ resize2fs "$ROOT_DEV"
 
 touch "$STAMP_FILE"
 systemctl disable expand-rootfs.service >/dev/null 2>&1 || true
-
