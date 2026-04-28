@@ -1,0 +1,15 @@
+[Unit]
+Description=EAIE OLED Status Display
+After=systemd-udevd.service NetworkManager.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/eaie-oled-status
+User=eaie
+SupplementaryGroups=video
+ExecStart=/usr/local/bin/eaie-oled-status
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
