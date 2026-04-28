@@ -37,4 +37,23 @@ import OpenGL
 print(f"Qt {QtCore.__version__}, PySide6 {PySide6.__version__}, PyOpenGL {OpenGL.__version__}")
 PY
 
+echo "==> installing desktop shortcut"
+DESKTOP_TARGET="$HOME/Desktop/eaie-accelerometer-demo.desktop"
+mkdir -p "$HOME/Desktop"
+cat > "$DESKTOP_TARGET" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=EAIE Accelerometer Demo
+Comment=3D visualization of MPU6050 accelerometer and gyroscope data
+Exec=/home/eaie/demos/accelerometer/app_accel.py
+TryExec=/home/eaie/demos/accelerometer/app_accel.py
+Icon=applications-science
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+DESKTOP
+chmod +x "$DESKTOP_TARGET"
+echo "    -> $DESKTOP_TARGET"
+
 echo "==> done"

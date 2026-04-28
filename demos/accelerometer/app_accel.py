@@ -82,7 +82,7 @@ from OpenGL.GL import (
     glVertexAttribPointer,
     glViewport,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QRect, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication
@@ -387,6 +387,7 @@ class AxisScene(QOpenGLWidget):
         self._read_errors = 0
         self._last_g = (0.0, 0.0, 0.0)
         self._last_gyro_dps = (0.0, 0.0, 0.0)
+        self._exit_button_rect = QRect()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_sample)
         self._timer.start(SAMPLE_PERIOD_MS)
@@ -582,6 +583,22 @@ class AxisScene(QOpenGLWidget):
                     continue
                 painter.drawText(int(sp[0]) + 10, int(sp[1]) + 6, letter)
 
+        # Exit button — top right. Rect is cached so mousePressEvent can hit-test it.
+        btn_w, btn_h, btn_margin = 100, 40, 20
+        self._exit_button_rect = QRect(
+            self.width() - btn_margin - btn_w, btn_margin, btn_w, btn_h
+        )
+        painter.setBrush(QColor(45, 45, 50, 220))
+        painter.setPen(QColor(200, 200, 200, 180))
+        painter.drawRoundedRect(self._exit_button_rect, 6, 6)
+
+        btn_font = QFont()
+        btn_font.setPointSize(13)
+        btn_font.setBold(True)
+        painter.setFont(btn_font)
+        painter.setPen(QColor(240, 240, 240))
+        painter.drawText(self._exit_button_rect, Qt.AlignmentFlag.AlignCenter, "Exit")
+
         painter.end()
 
     def _draw_tick_label(
@@ -600,6 +617,13 @@ class AxisScene(QOpenGLWidget):
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
             self.close()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and \
+                self._exit_button_rect.contains(event.position().toPoint()):
+            self.close()
+            return
+        super().mousePressEvent(event)
 
 
 def main() -> int:

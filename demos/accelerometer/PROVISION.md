@@ -41,6 +41,20 @@ packages built against their Qt config, so PySide6 imports cleanly.
 | `python3-pyside6.qtopenglwidgets` | `QOpenGLWidget` for the 3D canvas. |
 | `python3-opengl` | PyOpenGL — direct GL function calls inside `paintGL()`. |
 
+### Desktop shortcut
+
+Installs `~/Desktop/eaie-accelerometer-demo.desktop` so the demo is launchable
+from the LXQt desktop with a double-click. Points at
+`/home/eaie/demos/accelerometer/app_accel.py`. The script writes the
+`.desktop` file via heredoc, so the install is self-contained and doesn't
+depend on `deploy.sh` having run first.
+
+If the demo is renamed or moved, update both the heredoc in `provision.sh`
+and this section. When the demo is folded into the image build, the
+`.desktop` file will move under `scripts/assets/` and be installed system-wide
+into `/usr/share/applications/` (mirroring the existing
+`eaie-display-cycle.desktop` pattern).
+
 No other system changes are required for the v1 (50 Hz, sysfs-poll) demo.
 
 ## Future changes (not yet active)
@@ -59,14 +73,17 @@ These are documented here so we don't forget them when they become relevant:
 When the demo is stable enough to be part of the product image, these changes
 move into [scripts/build-rootfs-in-container.sh](../../scripts/build-rootfs-in-container.sh):
 
-1. Append the three packages to `install_rootfs_packages()`, alongside the
-   existing YOLOv8 stack.
-2. Extend `validate_required_runtime()` so a missing PyQt6 import aborts the
+1. Append the PySide6 + PyOpenGL packages to `install_rootfs_packages()`,
+   alongside the existing YOLOv8 stack.
+2. Extend `validate_required_runtime()` so a missing PySide6 import aborts the
    build (per the README rule that partial rootfs builds are not allowed).
 3. Add a new installer function (e.g. `install_accelerometer_demo_assets()`)
    that copies the app's source tree into the rootfs, called from `main()`
    through `run_timed_phase`.
-4. Add the installed paths to `verify_generated_partition_images()`.
+4. Move the `.desktop` file out of the `provision.sh` heredoc into
+   `scripts/assets/eaie-accelerometer-demo.desktop` and install it under
+   `/usr/share/applications/` (system-wide), mirroring `eaie-display-cycle`.
+5. Add the installed paths to `verify_generated_partition_images()`.
 
 At that point this folder shrinks to source-only, and `provision.sh` either
 becomes a no-op or is deleted.
