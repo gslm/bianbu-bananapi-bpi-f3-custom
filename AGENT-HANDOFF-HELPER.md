@@ -1,6 +1,6 @@
-# CLAUDE Helper Handoff
+# Agent Handoff Helper
 
-This document is a handoff for another developer taking over the
+This document is the handoff for the next agent taking over the
 `bianbu-bananapi-bpi-f3-custom` workspace. It captures the current state,
 validated hardware facts, important repo conventions, known pitfalls, and the
 next intended task.
@@ -12,21 +12,22 @@ then use this file as the current-session handoff.
 
 - Do not run build, flash, SSH deploy, or live board deployment commands unless
   the user explicitly asks you to run them.
-- Prefer generating commands for the user to run manually. The user requested
-  this because long-running build/deploy commands can break the Codex chat
-  session.
+- Prefer generating commands for the user to run manually. Long-running
+  build/deploy commands have historically broken or timed out chat sessions.
 - If SSH is needed, ask the user for the current board IP first. DHCP lease time
   is short and prior IPs are not reliable.
 - The last known board IP used in this work was `192.168.28.101`, but do not
   assume it is still valid.
-- Use `/bin/bash script.sh ...` for repo scripts unless the script is known to
-  be executable. The user's interactive shell is `zsh`, and some scripts are
-  not executable.
+- Use `bash script.sh ...` (or `/bin/bash script.sh ...`) for repo scripts. The
+  user's interactive shell is `zsh`, and a few helper scripts are not marked
+  executable.
 - Do not silently patch risky build, kernel, or deployment logic. Discuss the
   reasoning first when behavior changes could affect image reproducibility or
   flashing.
 - Do not revert unrelated dirty files. This workspace commonly has generated
   artifacts, rootfs staging files, and side-task directories.
+- Do not commit automatically. The user always reviews proposed commit
+  messages and runs commits themselves.
 
 ## Project Overview
 
@@ -60,6 +61,8 @@ Important local paths:
   [sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_deb1-common.dtsi](sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_deb1-common.dtsi)
 - kernel defconfig:
   [sources/kernel/linux-6.6/arch/riscv/configs/k1_defconfig](sources/kernel/linux-6.6/arch/riscv/configs/k1_defconfig)
+- accelerometer demo (built in the previous session):
+  [demos/accelerometer/](demos/accelerometer/)
 - commit scope rules:
   [COMMIT-SCOPE.md](COMMIT-SCOPE.md)
 
@@ -79,6 +82,10 @@ EAIE_CUSTOM_UBOOT_SOURCE_URL=git@github.com:gslm/uboot-2022.10-spacemit-k1.git
 EAIE_CUSTOM_UBOOT_SOURCE_REF=eaie-v1-riscv-spacemitk1
 ```
 
+Note: `build.conf` lists `BOARD_HOST=192.168.28.85` but the board has been
+seen at `192.168.28.101` (DHCP-varying). Always confirm the current IP with
+the user before using SSH-based deploy scripts.
+
 Development credentials in the image are intentionally simple for lab work:
 
 ```text
@@ -94,34 +101,52 @@ Do not treat these as production credentials.
 At the time this handoff was generated, root repo status showed:
 
 ```text
- M scripts/assets/expand-rootfs.sh
- M scripts/build-bianbu.sh
- M scripts/build-rootfs-in-container.sh
-?? check.log
-?? demos/
-?? scripts/assets/eaie-oled-status.py
-?? scripts/assets/eaie-oled-status.service
-?? scripts/zero-trust/
+ M demos/accelerometer/PROVISION.md
+ D demos/accelerometer/app.py
+ M demos/accelerometer/provision.sh
+?? demos/accelerometer/app_accel.py
+?? demos/accelerometer/docs/
 ```
 
-The kernel tree status was clean when checked from the orchestrator repo:
+What this means:
+
+- `app.py` → `app_accel.py` rename — done in working tree, not yet committed.
+- `provision.sh` and `PROVISION.md` modified — the desktop-shortcut step was
+  added late in the previous session.
+- `demos/accelerometer/docs/` is the new six-document learning reference set,
+  not yet committed.
+
+The user has not yet committed any of these. Generate commit commands for the
+user to run when they ask. The natural single commit covering all four
+changes would be something like:
 
 ```text
-git -C sources/kernel/linux-6.6 status --short
+feat(kernel): Refine MPU6050 demo (rename, exit button, desktop shortcut, docs)
 ```
 
-The U-Boot tree had generated packaging/build outputs:
+…or split per concern (rename / exit button / desktop shortcut / docs) if the
+user prefers fine-grained history.
+
+The kernel and U-Boot trees may have local generated artifacts (`debian/`,
+build outputs). Do not delete or revert those without asking.
+
+## Recently Committed Work (Previous Session)
+
+These commits landed during the previous session — useful context for the
+next agent:
 
 ```text
- M debian/control
-?? debian/debhelper-build-stamp
-?? debian/files
-?? debian/u-boot-spacemit.substvars
-?? debian/u-boot-spacemit/
+85950e2 feat(zt-secure-element): Track zero-trust workstream tasks
+aaac0c7 feat(daemon-control): Add EAIE OLED status display service
+6eddd74 fix(rootfs): Tolerate growpart NOCHANGE and stray lsblk whitespace
+466575e feat(build-system): Harden apt flow and bake ML imaging stack
+d9debfc feat(ntn): Add EC25 5G AT command demo script
+a943a52 feat(kernel): Add MPU6050 3D visualization demo
+f22a16b refactor(build-system): Rename CLAUDE-HELPER to AGENT-HANDOFF-HELPER
 ```
 
-Do not delete or revert these without asking the user. Some may be generated
-artifacts from prior package builds.
+The MPU6050 demo commit is the bulk of what the user and previous agent
+worked on. See "Accelerometer Demo App" below for what's in it.
 
 ## Current Validated Hardware Bring-Up
 
@@ -136,6 +161,40 @@ The board currently boots with:
 Runtime Linux DTB selection still uses the stock-compatible U-Boot path. The
 EAIE DTB is staged using the `k1-x_deb1` runtime alias so stock U-Boot can keep
 loading the expected DTB name.
+
+### Display Panel
+
+A 7" HDMI touchscreen is attached:
+
+- Make/model: JRP JRP7006H
+- Preferred mode: **1024×600 @ 60.95 Hz**
+- Max negotiable: 1920×1080 @ 60 Hz
+- Touch goes via USB to the board (not the dev machine)
+
+This is the display the accelerometer demo renders on. Refresh-rate ceiling is
+the panel itself (~61 Hz); no point rendering faster than that.
+
+### Wayland Session
+
+LXQt autologs into a `labwc` (wlroots-based) Wayland compositor. Important
+env vars for any new GUI app launched from a non-graphical shell (SSH,
+serial):
+
+```text
+XDG_RUNTIME_DIR=/run/user/1000
+WAYLAND_DISPLAY=wayland-0
+QT_QPA_PLATFORM=wayland
+```
+
+The accelerometer demo's `app_accel.py` and `smoke.py` auto-discover these
+when not already set. New GUI apps should follow the same pattern.
+
+### GL Stack (very important)
+
+- GPU: Imagination PowerVR B-Series BXE-2-32 — **hardware-accelerated**.
+- Driver: `pvr` via Mesa 24.01.
+- API: **OpenGL ES only** (no desktop GL); reports OpenGL ES 3.2 in practice.
+- Mesa software fallback (llvmpipe) is available if needed but not used.
 
 ### SPI TPM
 
@@ -168,9 +227,10 @@ Current status:
 status = "disabled";
 ```
 
-Do not assume the OLED is the target display for the next application. The next
-user request says "display screen" and likely means the HDMI/LXQt display, but
-clarify before implementing UI code if needed.
+A new OLED status-display service was added to the build under
+`scripts/assets/eaie-oled-status.{py,service}` — see the
+`feat(daemon-control)` commit for details. It's separate from the
+accelerometer demo.
 
 ### EC25 Modem
 
@@ -194,7 +254,8 @@ ttyUSB3
 ```
 
 ModemManager reported primary AT port `ttyUSB2`. SIM was missing during the
-test, which was expected.
+test, which was expected. A small AT-command helper script was committed to
+`demos/ec25/`.
 
 ### MPU6050 IMU
 
@@ -248,33 +309,67 @@ Current kernel config:
 
 ```text
 CONFIG_IIO=y
+CONFIG_INV_MPU6050_IIO=m
 CONFIG_INV_MPU6050_I2C=m
 ```
 
-The running board after correct kernel and DTB deployment showed:
+The running board after correct kernel and DTB deployment shows:
 
 ```text
-Linux host1 6.6.63 #7 SMP PREEMPT Fri Apr 24 16:06:55 -03 2026 riscv64
-CONFIG_INV_MPU6050_IIO=m
-CONFIG_INV_MPU6050_I2C=m
-/lib/modules/6.6.63/kernel/drivers/iio/imu/inv_mpu6050/inv-mpu6050.ko
-/lib/modules/6.6.63/kernel/drivers/iio/imu/inv_mpu6050/inv-mpu6050-i2c.ko
+Linux host1 6.6.63 #7 SMP PREEMPT
 /sys/bus/i2c/devices/4-0068/driver -> .../bus/i2c/drivers/inv-mpu6050-i2c
 /sys/bus/iio/devices/iio:device1
 ```
 
-Validated raw readings after moving the module:
+## Userspace GUI Stack — Bianbu Specifics
+
+This section captures the lessons from the previous session about Bianbu's
+Qt/Python GUI environment. **Read this before starting any new GUI work** —
+several non-obvious gotchas.
+
+### Use PySide6, not PyQt6
+
+Bianbu's Qt 6.8.3 is built **OpenGL-ES-only** — the desktop-GL helper
+classes (`QOpenGLFunctions_*_Core`) are not exported from `libQt6OpenGL.so`.
+
+Consequences:
+
+- Upstream Debian `python3-pyqt6` references those classes →
+  `from PyQt6.QtOpenGLWidgets import QOpenGLWidget` fails with
+  `undefined symbol _ZTI25QOpenGLFunctions_4_1_Core`. **PyQt6 is broken on
+  this distro.**
+- Bianbu ships their own PySide6 6.8.3 packages, built against their Qt
+  config. Available as `python3-pyside6.qtcore`, `.qtgui`, `.qtwidgets`,
+  `.qtopengl`, `.qtopenglwidgets`.
+
+### Even on PySide6, do not use `PySide6.QtOpenGL`
+
+The `python3-pyside6.qtopengl` package's `.abi3.so` references
+`_ZTI25QOpenGLFunctions_4_0_Core`, also missing. Importing **anything** from
+`PySide6.QtOpenGL` (e.g. `QOpenGLBuffer`, `QOpenGLShader`,
+`QOpenGLShaderProgram`, `QOpenGLVertexArrayObject`) fails on this distro.
+
+Working pattern used in the demo:
+
+- Import `QOpenGLWidget` from `PySide6.QtOpenGLWidgets` (separate `.so`,
+  loads cleanly).
+- Use **PyOpenGL** (`python3-opengl`) directly for ALL GL function calls
+  (shader compile/link, VBO/VAO, uniforms, draw calls).
+- `PySide6.QtCore`, `PySide6.QtGui`, `PySide6.QtWidgets` work normally.
+
+The `provision.sh` for the accelerometer demo installs the right packages
+plus PyOpenGL.
+
+### Verified working stack
 
 ```text
-in_accel_x_raw = 754
-in_accel_y_raw = 6
-in_accel_z_raw = 17844
-in_anglvel_x_raw = -35
-in_anglvel_y_raw = 2
-in_anglvel_z_raw changed between -1, 63, -10, 18
+Qt:        6.8.3
+PySide6:   6.8.3
+PyOpenGL:  3.1.9
+GL_VENDOR:   Imagination Technologies
+GL_RENDERER: PowerVR B-Series BXE-2-32
+GL_VERSION:  OpenGL ES 3.2 build 24.2@6603887
 ```
-
-This confirms kernel-level MPU6050 bring-up is successful.
 
 ## MPU6050 Board-Side Validation Commands
 
@@ -324,30 +419,6 @@ Important pitfall:
   symlink is absent.
 - Prefer `ls -l /sys/bus/i2c/devices/4-0068/driver`.
 
-Confirm IIO channels:
-
-```bash
-for d in /sys/bus/iio/devices/iio:device*; do
-  echo "== $d =="
-  cat "$d/name"
-  ls "$d" | grep -E 'in_accel|in_anglvel|sampling_frequency|scale'
-done
-```
-
-Expected MPU6050 device:
-
-```text
-== /sys/bus/iio/devices/iio:device1 ==
-mpu6050
-in_accel_x_raw
-in_accel_y_raw
-in_accel_z_raw
-in_anglvel_x_raw
-in_anglvel_y_raw
-in_anglvel_z_raw
-sampling_frequency
-```
-
 Read raw values:
 
 ```bash
@@ -358,6 +429,14 @@ cat "$D/in_accel_z_raw"
 cat "$D/in_anglvel_x_raw"
 cat "$D/in_anglvel_y_raw"
 cat "$D/in_anglvel_z_raw"
+```
+
+If reads are returning all zeros after a period of intermittent I2C errors,
+the chip may be stuck. Recover without rebooting via driver unbind/rebind:
+
+```bash
+echo 4-0068 | sudo tee /sys/bus/i2c/drivers/inv-mpu6050-i2c/unbind
+echo 4-0068 | sudo tee /sys/bus/i2c/drivers/inv-mpu6050-i2c/bind
 ```
 
 ## MPU6050 Sampling Rate And Units
@@ -382,24 +461,6 @@ Interpretation:
 500 Hz = 2 ms period
 ```
 
-Gyroscope readings are available. The driver exposes:
-
-```text
-in_anglvel_x_raw
-in_anglvel_y_raw
-in_anglvel_z_raw
-in_anglvel_scale
-```
-
-Accelerometer readings are available. The driver exposes:
-
-```text
-in_accel_x_raw
-in_accel_y_raw
-in_accel_z_raw
-in_accel_scale
-```
-
 Raw-to-physical conversion:
 
 ```text
@@ -407,48 +468,159 @@ accel_m_per_s2 = in_accel_*_raw * in_accel_scale
 gyro_rad_per_s = in_anglvel_*_raw * in_anglvel_scale
 ```
 
-For a simple display application, sysfs polling at 5 to 10 FPS is sufficient.
-For future machine-learning data collection, use the IIO buffered interface with
-timestamps instead of repeated sysfs file reads.
+The sysfs polling path used by the demo opens 6 files per sample (3 accel +
+3 gyro) — comfortable up to ~100 Hz. For higher rates, switch to the IIO
+buffered chardev (`/dev/iio:device1`), which also requires a udev rule
+because the chardev is `root:root 0600`. This is documented as a future
+upgrade path in [demos/accelerometer/PROVISION.md](demos/accelerometer/PROVISION.md).
+
+## Accelerometer Demo App
+
+This is the main artifact of the previous session. **A working PySide6 +
+OpenGL ES 3 fullscreen 3D visualization of live MPU6050 data.**
+
+### Location
+
+Source: [demos/accelerometer/](demos/accelerometer/)
+
+Files:
+
+```text
+demos/accelerometer/
+├── app_accel.py            # the demo (renamed from app.py)
+├── smoke.py                # minimal "is the GUI stack alive?" test
+├── run.sh                  # board-side launcher (smoke wrapper)
+├── deploy.sh               # host → board rsync
+├── provision.sh            # apt installs + desktop shortcut
+├── PROVISION.md            # board-side change log
+├── axis-display.png        # original visual reference
+└── docs/                   # six-document learning reference
+    ├── README.md
+    ├── 01-PYTHON-CONCEPTS.md
+    ├── 02-PYSIDE6-CONCEPTS.md
+    ├── 03-OPENGL-CONCEPTS.md
+    ├── 04-APP-WALKTHROUGH.md
+    └── 05-SCAFFOLDING.md
+```
+
+On the board: `~/demos/accelerometer/`. Desktop shortcut at
+`~/Desktop/eaie-accelerometer-demo.desktop`.
+
+### Features
+
+- Fullscreen `QOpenGLWidget` on a dark-blue-grey background.
+- 3D coordinate tripod with **G-scaled live arrows** on each axis (X red,
+  Y green, Z blue). Arrow length tracks the current G value; sign flips
+  the direction.
+- Arrowhead cones at axis tips (16-segment closed cones).
+- Faint cool-white reference grid in all three coordinate planes
+  (every 0.5 G; spans ±2 G in each axis).
+- Tick labels at 0.5 G intervals along each positive axis, color-matched.
+- Bold `X` / `Y` / `Z` border letters at both ends of each axis.
+- Top-left HUD: monospaced live G and ω readout.
+- **Gyro arcs** — partial circles curling around each axis at the static
+  1 G mark, length proportional to ω, direction by sign.
+- **Top-right Exit button** for click/touch close.
+- ESC and Ctrl+C also close.
+- Robust to transient I2C errors (warns, keeps last good values, recovers).
+- 50 Hz IIO sysfs polling on a `QTimer`; 50 Hz console print configurable
+  via `PRINT_EVERY_N`.
+
+### Architectural choices the next agent should know
+
+- One static VBO + one VAO; static geometry (axes, arrows, grid) loaded once
+  in `initializeGL`. Gyro arcs are streamed each frame to a reserved tail
+  region via `glBufferSubData`.
+- A single shader program. Vertex shader does optional per-axis G-scaling
+  via `axis_idx` attribute (`0/1/2 = scale by u_g.x/y/z`, `-1 = static`).
+- Two-pass render: opaque (axes / arrows / gyro) writes depth normally,
+  then transparent (grid) with depth-write off and alpha blending.
+- `QPainter` overlay drawn on the same widget after raw GL — used for the
+  HUD, tick labels, axis letters, and Exit button.
+- `_world_to_screen` projects 3D positions to 2D pixels for label
+  placement, using the cached MVP from the most recent paint.
+
+### Iteration loop
+
+```text
+host: edit demos/accelerometer/app_accel.py
+host: bash demos/accelerometer/deploy.sh        # rsync to board
+board: ~/demos/accelerometer/app_accel.py       # run (or use the desktop shortcut)
+```
+
+`provision.sh` is one-time-per-reflash:
+
+```text
+host: sshpass -p eaie ssh eaie@<ip> 'BOARD_PASS=eaie bash -s' \
+        < demos/accelerometer/provision.sh
+```
+
+It installs PySide6 + PyOpenGL via apt and writes the desktop shortcut.
+
+### Documentation
+
+Six documents under `demos/accelerometer/docs/` aimed at someone with
+limited Python and no PyQt/OpenGL background:
+
+- README.md — entry point, learning order, glossary
+- 01-PYTHON-CONCEPTS.md — Python idioms used
+- 02-PYSIDE6-CONCEPTS.md — Qt6/PySide6 fundamentals
+- 03-OPENGL-CONCEPTS.md — OpenGL ES rendering fundamentals
+- 04-APP-WALKTHROUGH.md — function-by-function tour of `app_accel.py`
+  (the longest doc; 25 numbered sections)
+- 05-SCAFFOLDING.md — `smoke.py`, `provision.sh`, `deploy.sh`, `run.sh`
+
+If you make non-trivial changes to `app_accel.py`, the user expects the
+walkthrough doc to stay reasonably current. Line numbers in the doc are
+loose (cited as ranges); narrative content matters more than exact
+line numbers.
 
 ## Current Intended Next Task
 
-The next main task is to create a simple application that reads MPU6050 data and
-displays it on the board's display screen.
+The previous session **completed** what was originally tracked here as
+"create a simple application that reads MPU6050 data and displays it on
+the board's display screen." That task is now done — see "Accelerometer
+Demo App" above.
 
-The user's longer-term intent is:
+The user has not yet specified the next task. Wait for direction. Options
+they may want to pick from (and have hinted at):
 
-- collect IMU data
-- train a neural network
-- detect events such as board movement, falling, touches, or shocks
-- eventually run the trained AI model on the board
+1. **Visual polish on the demo**:
+   - Arrowhead at the end of each gyro arc (direction indicator).
+   - Saturation indication when an axis hits ±2 G or ω hits ±200 °/s.
+   - Pause/freeze key for inspecting a snapshot.
+   - Sensor-bias auto-zero on launch (gyro drift is non-trivial at rest).
 
-Do not jump directly to ML. Start small.
+2. **Performance / data path upgrade**:
+   - Move the IMU read path from sysfs polling to the IIO buffered chardev,
+     to reliably push past 50 Hz. Requires a udev rule (already documented
+     in [PROVISION.md](demos/accelerometer/PROVISION.md) as a future change).
 
-Recommended next-step discussion:
+3. **Sensor fusion / orientation**:
+   - Add a Madgwick or complementary filter to derive a stable orientation
+     quaternion from accel + gyro. Display as a rotating board model or
+     as a tilt indicator.
+   - Useful for actually visualising "how the board is oriented" rather
+     than just "which way gravity is pulling."
 
-- Confirm whether "display screen" means the HDMI/LXQt display or the old
-  SSD1306 OLED. The OLED node is currently disabled, so HDMI/LXQt is the safer
-  assumption, but ask if unclear.
-- Decide whether the first prototype should be a terminal dashboard, an OpenCV
-  window, a Qt/LXQt window, or a direct framebuffer view.
-- For fastest validation, prefer a userspace app that reads IIO sysfs channels
-  and displays raw/scaled values.
-- Keep the first version simple: read accel XYZ, gyro XYZ, temperature if
-  useful, sampling frequency, and maybe a simple movement magnitude.
-- Later, add logging and buffered IIO capture for training data.
+4. **Production hardware swap**:
+   - Final board uses `LSM6DSO32TR`, not MPU6050. The DTS, kernel config,
+     and possibly the IIO channel names will change.
 
-Reasonable first prototype options:
+5. **Image-build integration**:
+   - Migrate the demo's prerequisites and source tree into
+     `scripts/build-rootfs-in-container.sh`, mirroring the existing
+     YOLOv8 / OLED-status patterns. Move the `.desktop` file out of the
+     `provision.sh` heredoc and into `scripts/assets/`. After this, the
+     demo ships with the image rather than being deployed manually.
 
-- Terminal dashboard using Python and ANSI refresh.
-- OpenCV window, if the LXQt session and OpenCV GUI backend work on the board.
-- Simple web dashboard served locally, viewed on the board browser or another
-  machine.
-- Native Qt application later if the UI becomes productized.
+6. **Longer-term ML pipeline**:
+   - Buffered IMU capture with timestamps for training data.
+   - Train a model off-board (event detection: falls, taps, shocks).
+   - Run inference on the SpacemiT K1 NPU using the same toolchain that
+     powers the YOLOv8 demo (`python3-spacemit-ort`).
 
-Avoid adding this prototype into the base image until it is validated. A good
-first location would be a tracked `demos/imu/` directory unless the user wants
-it installed as a system service.
+Pick from the user's request, not from this list — these are sketches.
 
 ## Manual Build And Deploy Command References
 
@@ -512,6 +684,40 @@ The build writes full logs under:
 
 Inspect logs before flashing.
 
+## Demo Iteration Commands
+
+For the accelerometer demo specifically:
+
+Provision the board (one-time-per-reflash):
+
+```bash
+sshpass -p eaie ssh eaie@<board-ip> \
+  'BOARD_PASS=eaie bash -s' \
+  < demos/accelerometer/provision.sh
+```
+
+Sync demo files from host to board (per edit):
+
+```bash
+bash demos/accelerometer/deploy.sh
+```
+
+Override targets via env: `BOARD_HOST`, `BOARD_USER`, `BOARD_PASS`,
+`REMOTE_DIR`.
+
+Run the demo (board-side):
+
+```bash
+~/demos/accelerometer/app_accel.py
+# OR double-click "EAIE Accelerometer Demo" on the LXQt desktop
+```
+
+Run the smoke test (when troubleshooting GUI stack issues):
+
+```bash
+~/demos/accelerometer/smoke.py
+```
+
 ## Flashing Notes
 
 The repo has a host-side fastboot flasher:
@@ -535,28 +741,67 @@ this dev machine. Be cautious before suggesting repeated full flashes.
 
 ## Known Pitfalls
 
+### Hardware
+
 - DTS-only deployment is not enough when a new kernel driver/config is needed.
   This happened with MPU6050: DTB was active, I2C device existed, but the driver
   could not bind until the kernel package with `CONFIG_INV_MPU6050_I2C=m` was
   deployed.
-- `sampling_frequency` under IIO is in Hz, not milliseconds.
+- The active external-header I2C4 node is `i2c@d4012800`, not `i2c@d4013800`.
+- Board IP changes often. Ask for the current IP before SSH.
 - `i2cdetect` can skip addresses on this controller. Use `i2cget` for explicit
   register probing.
-- The active external-header I2C4 node is `i2c@d4012800`, not
-  `i2c@d4013800`.
-- Board IP changes often. Ask for the current IP before SSH.
+
+### Sensors / I2C
+
+- `sampling_frequency` under IIO is in Hz, not milliseconds.
+- Flaky I2C wiring causes intermittent `OSError(EINVAL)` on sysfs reads. The
+  demo's `_on_sample` catches these, keeps last-good values, and warns
+  sparsely. Worth keeping the same pattern in any future IMU app.
+- After persistent I2C glitches the MPU6050 can enter a stuck state where the
+  driver keeps returning zeros. Recovery without reboot:
+  `echo 4-0068 | sudo tee /sys/bus/i2c/drivers/inv-mpu6050-i2c/{unbind,bind}`.
+
+### GUI / Qt stack (Bianbu-specific)
+
+- **Do not use PyQt6.** Bianbu's Qt is ES-only; PyQt6's `QtOpenGLWidgets`
+  fails to import.
+- **Do not use `PySide6.QtOpenGL`.** Same root cause; the whole module
+  fails to load. Use PyOpenGL for GL-helper functionality.
+- `QOpenGLWidget` from `PySide6.QtOpenGLWidgets` is fine and is the
+  canonical canvas widget.
+- `QPainter` on a `QOpenGLWidget` works for 2D overlays — call it AFTER
+  raw GL drawing inside `paintGL`, end the painter before `paintGL`
+  returns.
+- For `glUniformMatrix4fv` from a NumPy matrix, pass `transpose=GL_TRUE`
+  because NumPy is row-major and GL is column-major.
+- ES guarantees only line width 1.0; query
+  `GL_ALIASED_LINE_WIDTH_RANGE` if you need confidence. PowerVR here
+  supports up to 16.0.
+- Python's default SIGINT handler can't fire inside Qt's C++ event loop.
+  `signal.signal(signal.SIGINT, signal.SIG_DFL)` early in `main` lets
+  Ctrl+C kill the process cleanly.
+- A Qt app launched from a non-graphical shell (SSH, serial) needs
+  `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY=wayland-0`, and
+  `QT_QPA_PLATFORM=wayland` exported. The accelerometer demo
+  auto-discovers these at startup.
+
+### Build / deploy
+
 - The rootfs/build folders may contain root-owned files and permission-denied
   paths. Do not run broad `find`/`git status` against `rootfs/` unless needed.
 - Full `bindeb-pkg` kernel packaging is slow because it builds multiple Debian
   packages including headers, tools, libc headers, and debug packages.
 - A future TODO exists to split full Debian kernel packaging from a lightweight
   kernel/DTB/module iteration flow.
+- Partial rootfs builds are now disabled by default (`ALLOW_PARTIAL_ROOTFS=0`).
+  Failures abort the image build.
 
 ## Commit Guidance
 
 Follow [COMMIT-SCOPE.md](COMMIT-SCOPE.md).
 
-Allowed types currently listed:
+Listed types:
 
 ```text
 feat
@@ -564,39 +809,76 @@ fix
 refactor
 ```
 
-Relevant scopes for the current work:
+Recent history also uses `docs(scope)` despite it not being in
+`COMMIT-SCOPE.md`. The user has not pushed back on this; treat it as
+de-facto allowed.
+
+Relevant scopes for current work:
 
 ```text
 kernel
 build-system
 rootfs
 ai-apps
+ntn
 system-config
 daemon-control
+zt-secure-element
+zt-secure-boot
 uboot
 ```
 
-Suggested scopes:
+Subject style (from existing commits): `type(scope): Subject in title case`.
+Bodies are short and explanatory; some commits omit them entirely.
+
+Suggested mappings:
 
 - DTS and defconfig changes: `feat(kernel): ...`
-- README/handoff documentation: `feat(build-system): ...` or
-  `fix(build-system): ...` depending on context, because `docs` is not listed
-  in `COMMIT-SCOPE.md`
-- Demo IMU userspace app: `feat(ai-apps): ...` if it is framed as the first
-  AI-data demo path, or `feat(system-config): ...` if it becomes a system
-  service
+- Userspace IMU demo work: `feat(kernel): ...` (precedent — the existing
+  `feat(kernel): Add MPU6050 3D visualization demo` covers the demo's GUI
+  app, since the demo exercises the kernel-side IIO/I2C MPU6050 driver).
+  An alternative would be a new `demos` scope, which would require a
+  COMMIT-SCOPE.md addition.
+- Build orchestration and project docs: `feat/refactor(build-system): ...`
+- OLED status daemon: `feat(daemon-control): ...`
+- 5G modem helpers: `feat(ntn): ...`
 
-Do not commit automatically unless the user explicitly asks. The user usually
-wants commands generated first for review.
+Do not commit automatically. The user always reviews proposed messages and
+runs `git add` + `git commit` themselves. When generating commit commands,
+use HEREDOCs for the message body and prefer specific `git add <files>`
+over `git add -A`.
+
+## Auto-Memory Note
+
+The previous agent maintained an auto-memory store at:
+
+```text
+/home/guilhermes/.claude/projects/-media-guilhermes-ssd-EAIE-bianbu-bananapi-bpi-f3-custom/memory/
+```
+
+Entries:
+
+- `MEMORY.md` — index
+- `project_board_hw.md` — board hardware facts (IIO node, display panel,
+  GL stack, the PySide6-not-PyQt6 lesson, sudo pattern, etc.)
+- `project_ai_demo_track.md` — YOLOv8 demo state
+
+These are loaded automatically into the agent's context. They were updated
+during the previous session with the GUI-stack lessons, IMU sysfs paths, and
+display panel info. If you (next agent) operate without this memory system,
+the relevant facts are also captured in this handoff.
 
 ## Immediate Next Agent Checklist
 
 1. Read [README.md](README.md).
-2. Read this handoff file fully.
-3. Confirm with the user whether the first MPU6050 display app should target
-   HDMI/LXQt or another display path.
-4. Do not run build/deploy commands yourself.
-5. If implementing a prototype, start with a userspace sysfs/IIO reader.
-6. Keep future ML/data-collection work separate from the initial display demo.
-7. Document any new board-side validation commands and observed outputs.
-
+2. Read this handoff file fully — especially the "Userspace GUI Stack" and
+   "Accelerometer Demo App" sections.
+3. Skim [demos/accelerometer/docs/README.md](demos/accelerometer/docs/README.md)
+   so you know what the user expects you to be familiar with re: the demo.
+4. Confirm the current board IP with the user before any SSH operation.
+5. Wait for the user's next-task instruction. Do not pre-emptively continue
+   the demo.
+6. When generating any non-trivial code change to `app_accel.py`, plan to
+   keep [04-APP-WALKTHROUGH.md](demos/accelerometer/docs/04-APP-WALKTHROUGH.md)
+   reasonably current.
+7. Do not run build/deploy/flash commands yourself unless explicitly asked.
