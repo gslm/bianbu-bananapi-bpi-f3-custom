@@ -12,7 +12,7 @@ DEFAULT_LOCALE="${DEFAULT_LOCALE:-en_US.UTF-8}"
 DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-America/Sao_Paulo}"
 DEFAULT_USER="${DEFAULT_USER:-eaie}"
 DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-eaie}"
-ALLOW_PARTIAL_ROOTFS="${ALLOW_PARTIAL_ROOTFS:-1}"
+ALLOW_PARTIAL_ROOTFS="${ALLOW_PARTIAL_ROOTFS:-0}"
 BOARD_PROFILE="${BOARD_PROFILE:-bpi-f3}"
 BOARD_SOURCE_DTB_NAME="${BOARD_SOURCE_DTB_NAME:-k1-x_deb1}"
 BOARD_RUNTIME_DTB_NAME="${BOARD_RUNTIME_DTB_NAME:-k1-x_deb1}"
@@ -30,6 +30,8 @@ PARTIAL_BUILD=0
 CORE_BOOT_PACKAGES=""
 REPAIR_PACKAGES=""
 PRIMARY_KERNEL_VERSION=""
+APT_ENV="DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a UCF_FORCE_CONFFOLD=1"
+APT_OPTIONS="-y -o Dpkg::Use-Pty=0 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
 
 COLOR_RESET=$'\033[0m'
 COLOR_CYAN=$'\033[1;36m'
@@ -153,6 +155,42 @@ run_in_chroot() {
     chroot "$TARGET_ROOTFS" /bin/bash -c "$cmd"
 }
 
+run_apt_in_chroot() {
+    local cmd="$1"
+    run_in_chroot "$APT_ENV $cmd"
+}
+
+apt_update_chroot() {
+    run_apt_in_chroot "apt-get -o Dpkg::Use-Pty=0 update" \
+        || die "apt-get update failed inside the target rootfs"
+}
+
+apt_install_chroot() {
+    local description="$1"
+    shift
+
+    run_apt_in_chroot "apt-get $APT_OPTIONS --allow-downgrades install $*" \
+        || die "$description failed inside the target rootfs"
+}
+
+apt_reinstall_chroot() {
+    local description="$1"
+    shift
+
+    run_apt_in_chroot "apt-get $APT_OPTIONS --allow-downgrades install --reinstall $*" \
+        || die "$description failed inside the target rootfs"
+}
+
+apt_fix_install_chroot() {
+    run_apt_in_chroot "apt-get $APT_OPTIONS -f install" \
+        || die "apt-get -f install failed inside the target rootfs"
+}
+
+dpkg_configure_chroot() {
+    run_in_chroot "$APT_ENV dpkg --force-confdef --force-confold --configure -a" \
+        || die "dpkg --configure -a failed inside the target rootfs"
+}
+
 enable_rootfs_unit() {
     local unit="$1"
     local unit_path=""
@@ -234,6 +272,15 @@ validate_build_modes() {
     [[ -n "$BOARD_SOURCE_DTB_NAME" ]] || die "BOARD_SOURCE_DTB_NAME is not set"
     [[ -n "$BOARD_RUNTIME_DTB_NAME" ]] || die "BOARD_RUNTIME_DTB_NAME is not set"
     [[ -n "$BOARD_BOOT_ENV_NAME" ]] || die "BOARD_BOOT_ENV_NAME is not set"
+
+    case "${ALLOW_PARTIAL_ROOTFS,,}" in
+        0|no|false|'')
+            ALLOW_PARTIAL_ROOTFS=0
+            ;;
+        *)
+            die "Partial rootfs builds are disabled for this project; unset ALLOW_PARTIAL_ROOTFS or set it to 0."
+            ;;
+    esac
 }
 
 compose_package_sets() {
@@ -261,7 +308,7 @@ compose_package_sets() {
     fi
 
     CORE_BOOT_PACKAGES="${packages[*]}"
-    REPAIR_PACKAGES="${CORE_BOOT_PACKAGES} bianbu-minimal bianbu-desktop-lite locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server ffmpeg tpm2-tools"
+    REPAIR_PACKAGES="${CORE_BOOT_PACKAGES} bianbu-minimal bianbu-desktop-lite locales language-pack-en qt6-wayland xterm net-tools network-manager cloud-guest-utils sudo openssh-server ffmpeg tpm2-tools python3-pil python3-numpy python3-opencv onnxruntime python3-spacemit-ort"
 }
 
 resolve_workspace_path() {
@@ -442,7 +489,11 @@ trap cleanup EXIT
 install_container_tools() {
     log_info "Installing container-side build tools"
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a UCF_FORCE_CONFFOLD=1 \
+        apt-get install -y \
+        -o Dpkg::Use-Pty=0 \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
         ca-certificates \
         curl \
         genimage \
@@ -493,96 +544,92 @@ prepare_chroot_environment() {
 install_rootfs_packages() {
     log_info "Installing hardware support, desktop packages, and required extras"
 
-    run_in_chroot "apt-get update"
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install ${CORE_BOOT_PACKAGES}"; then
-        PARTIAL_BUILD=1
-        log_warn "Core package installation failed under qemu. The build will continue in partial-repair mode."
-    fi
-
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install bianbu-minimal"; then
-        PARTIAL_BUILD=1
-        log_warn "bianbu-minimal did not install cleanly under qemu. Deferring repair to first boot."
-    fi
-
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install bianbu-desktop-lite"; then
-        PARTIAL_BUILD=1
-        log_warn "bianbu-desktop-lite did not install cleanly under qemu. Deferring repair to first boot."
-    fi
-
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install locales language-pack-en qt6-wayland xterm net-tools cloud-guest-utils sudo openssh-server ffmpeg tpm2-tools"; then
-        PARTIAL_BUILD=1
-        log_warn "Customization packages did not install cleanly under qemu. Deferring repair to first boot."
-    fi
-
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -y --allow-downgrades install --reinstall qt6-wayland"; then
-        PARTIAL_BUILD=1
-        log_warn "qt6-wayland reinstall failed under qemu. Deferring repair to first boot."
-    fi
+    apt_update_chroot
+    apt_install_chroot "Core package installation" "$CORE_BOOT_PACKAGES"
+    apt_install_chroot "bianbu-minimal installation" bianbu-minimal
+    apt_install_chroot "bianbu-desktop-lite installation" bianbu-desktop-lite
+    apt_install_chroot "Customization package installation" \
+        locales language-pack-en qt6-wayland xterm net-tools network-manager \
+        cloud-guest-utils sudo openssh-server ffmpeg tpm2-tools python3-pil \
+        python3-numpy python3-opencv onnxruntime python3-spacemit-ort
+    apt_reinstall_chroot "qt6-wayland reinstall" qt6-wayland
 }
 
 repair_and_validate_packages() {
     log_info "Repairing and validating package state"
 
-    local final_bad_state=""
-
-    if ! run_in_chroot "dpkg --configure -a"; then
-        PARTIAL_BUILD=1
-        log_warn "dpkg --configure -a did not complete cleanly under qemu."
-    fi
-
-    if ! run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get -f install -y"; then
-        PARTIAL_BUILD=1
-        log_warn "apt-get -f install did not complete cleanly under qemu."
-    fi
-
-    if ! run_in_chroot "dpkg --configure -a"; then
-        PARTIAL_BUILD=1
-        log_warn "A second dpkg --configure -a pass still failed under qemu."
-    fi
+    dpkg_configure_chroot
+    apt_fix_install_chroot
+    dpkg_configure_chroot
 
     local bad_state
     bad_state="$(run_in_chroot "dpkg-query -W -f='\${db:Status-Abbrev} \${Package}\n' | awk '\$1 !~ /^(ii|rc)$/ {print}'" || true)"
     if [[ -n "$bad_state" ]]; then
-        PARTIAL_BUILD=1
         printf '%s\n' "$bad_state" >&2
-        if [[ "$ALLOW_PARTIAL_ROOTFS" -ne 1 ]]; then
-            die "The rootfs still contains incomplete packages."
-        fi
-        log_warn "The rootfs still contains incomplete packages. A native first-boot repair will be scheduled."
+        die "The rootfs still contains incomplete packages."
     fi
 
-    if ! run_in_chroot "ls /usr/lib/riscv64-linux-gnu/qt6/plugins/platforms/libqwayland*.so >/dev/null"; then
-        PARTIAL_BUILD=1
-        log_warn "The Qt6 Wayland platform plugin is still missing in the container rootfs."
-    fi
-
-    if ! run_in_chroot "command -v growpart >/dev/null"; then
-        PARTIAL_BUILD=1
-        log_warn "growpart is not present yet in the container rootfs."
-    fi
-
-    if ! run_in_chroot "command -v sshd >/dev/null"; then
-        PARTIAL_BUILD=1
-        log_warn "openssh-server is not present yet in the container rootfs."
-    fi
-
-    final_bad_state="$(run_in_chroot "dpkg-query -W -f='\${db:Status-Abbrev} \${Package}\n' | awk '\$1 !~ /^(ii|rc)$/ {print}'" || true)"
-    if [[ -z "$final_bad_state" ]] \
-        && run_in_chroot "ls /usr/lib/riscv64-linux-gnu/qt6/plugins/platforms/libqwayland*.so >/dev/null" \
-        && run_in_chroot "command -v growpart >/dev/null" \
-        && run_in_chroot "command -v sshd >/dev/null"; then
-        PARTIAL_BUILD=0
-    fi
-
-    if [[ "$PARTIAL_BUILD" -eq 1 ]]; then
-        if [[ "$ALLOW_PARTIAL_ROOTFS" -ne 1 ]]; then
-            die "The rootfs did not validate cleanly and partial builds are disabled."
-        fi
-        log_warn "Continuing with a partial rootfs. The image will self-repair on the first native boot."
-        return
-    fi
-
+    validate_required_runtime
     log_ok "Package state is clean and required runtime pieces are present"
+}
+
+validate_required_runtime() {
+    local required_packages=(
+        bianbu-minimal
+        bianbu-desktop-lite
+        locales
+        language-pack-en
+        qt6-wayland
+        xterm
+        net-tools
+        network-manager
+        cloud-guest-utils
+        sudo
+        openssh-server
+        ffmpeg
+        tpm2-tools
+        python3-pil
+        python3-numpy
+        python3-opencv
+        onnxruntime
+        python3-spacemit-ort
+        sddm
+        lxqt-core
+        lxqt-wayland-session
+        labwc
+        pcmanfm-qt
+    )
+    local package
+
+    for package in "${required_packages[@]}"; do
+        run_in_chroot "dpkg-query -W -f='\${db:Status-Abbrev}' '$package' 2>/dev/null | grep -q '^ii '" \
+            || die "Required rootfs package is not installed: $package"
+    done
+
+    run_in_chroot "ls /usr/lib/riscv64-linux-gnu/qt6/plugins/platforms/libqwayland*.so >/dev/null" \
+        || die "The Qt6 Wayland platform plugin is missing in the target rootfs."
+    run_in_chroot "test -f /usr/share/wayland-sessions/lxqt-wayland.desktop" \
+        || die "The LXQt Wayland session file is missing in the target rootfs."
+    run_in_chroot "test -f /usr/lib/systemd/system/NetworkManager.service" \
+        || die "NetworkManager.service is missing in the target rootfs."
+    run_in_chroot "test -f /usr/lib/systemd/system/sddm.service" \
+        || die "sddm.service is missing in the target rootfs."
+    run_in_chroot "command -v NetworkManager >/dev/null" \
+        || die "NetworkManager binary is missing in the target rootfs."
+    run_in_chroot "command -v sddm >/dev/null" \
+        || die "sddm binary is missing in the target rootfs."
+    run_in_chroot "command -v labwc >/dev/null" \
+        || die "labwc binary is missing in the target rootfs."
+    run_in_chroot "command -v growpart >/dev/null" \
+        || die "growpart is missing in the target rootfs."
+    run_in_chroot "command -v sshd >/dev/null" \
+        || die "openssh-server is missing in the target rootfs."
+    run_in_chroot "command -v onnxruntime_perf_test >/dev/null" \
+        || die "onnxruntime is missing in the target rootfs."
+    run_in_chroot "python3 -c \"import cv2, numpy, onnxruntime, spacemit_ort; assert 'SpaceMITExecutionProvider' in onnxruntime.get_available_providers()\"" \
+        || die "The YOLOv8 Python runtime stack is not usable in the target rootfs."
+    run_in_chroot "python3 -c \"from PIL import Image, ImageDraw, ImageFont\"" \
+        || die "The OLED status display Python imaging stack is not usable in the target rootfs."
 }
 
 configure_locale_timezone() {
@@ -595,13 +642,9 @@ configure_locale_timezone() {
     ln -snf "/usr/share/zoneinfo/$DEFAULT_TIMEZONE" "$TARGET_ROOTFS/etc/localtime"
     printf '%s\n' "$DEFAULT_TIMEZONE" > "$TARGET_ROOTFS/etc/timezone"
 
-    if [[ "$PARTIAL_BUILD" -eq 0 ]]; then
-        run_in_chroot "locale-gen '$DEFAULT_LOCALE'"
-        run_in_chroot "update-locale LANG='$DEFAULT_LOCALE' LC_ALL='$DEFAULT_LOCALE'"
-        run_in_chroot "dpkg-reconfigure --frontend=noninteractive tzdata"
-    else
-        log_warn "Locale generation and tzdata reconfigure are deferred to the first native boot."
-    fi
+    run_in_chroot "locale-gen '$DEFAULT_LOCALE'"
+    run_in_chroot "update-locale LANG='$DEFAULT_LOCALE' LC_ALL='$DEFAULT_LOCALE'"
+    run_in_chroot "$APT_ENV dpkg-reconfigure --frontend=noninteractive tzdata"
 
     log_ok "Locale and timezone configured"
 }
@@ -652,6 +695,27 @@ network:
 EOF
 
     chmod 600 "$TARGET_ROOTFS/etc/netplan/01-network-manager-all.yaml"
+
+    mkdir -p "$TARGET_ROOTFS/etc/NetworkManager/system-connections"
+    cat >"$TARGET_ROOTFS/etc/NetworkManager/system-connections/end0-dhcp.nmconnection" <<'EOF'
+[connection]
+id=end0-dhcp
+type=ethernet
+interface-name=end0
+autoconnect=true
+
+[ethernet]
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+addr-gen-mode=default
+EOF
+
+    chmod 600 "$TARGET_ROOTFS/etc/NetworkManager/system-connections/end0-dhcp.nmconnection"
+    enable_rootfs_unit_if_present NetworkManager.service
     log_ok "NetworkManager netplan is configured"
 }
 
@@ -754,6 +818,25 @@ EOF
     log_ok "The display-demo runner, wallpaper, and launcher are installed into the image"
 }
 
+install_oled_status_service() {
+    log_info "Installing the EAIE OLED status service"
+
+    install -Dm0755 "$WORKSPACE/scripts/assets/eaie-oled-status.py" \
+        "$TARGET_ROOTFS/usr/local/bin/eaie-oled-status"
+    install -Dm0644 "$WORKSPACE/scripts/assets/eaie-oled-status.service" \
+        "$TARGET_ROOTFS/etc/systemd/system/eaie-oled-status.service"
+
+    cat >"$TARGET_ROOTFS/etc/default/eaie-oled-status" <<EOF
+# EAIE OLED status display settings.
+EAIE_OLED_REFRESH_SECONDS=3
+EAIE_OLED_INTERFACES="end0 wlan0"
+EAIE_OLED_WAIT_SECONDS=30
+EOF
+
+    enable_rootfs_unit eaie-oled-status.service
+    log_ok "The OLED status service is installed and enabled"
+}
+
 generate_initramfs_images() {
     log_info "Generating initramfs images for installed kernels"
 
@@ -796,11 +879,7 @@ REPAIR_PACKAGES='$REPAIR_PACKAGES'
 EOF
 
     mkdir -p "$TARGET_ROOTFS${FIRSTBOOT_REPAIR_STATE_DIR}"
-    if [[ "$PARTIAL_BUILD" -eq 1 ]]; then
-        : > "$TARGET_ROOTFS${FIRSTBOOT_REPAIR_MARKER}"
-    else
-        rm -f "$TARGET_ROOTFS${FIRSTBOOT_REPAIR_MARKER}"
-    fi
+    rm -f "$TARGET_ROOTFS${FIRSTBOOT_REPAIR_MARKER}"
 
     enable_rootfs_unit eaie-firstboot-repair.service
     log_ok "The first-boot native repair service is installed"
@@ -893,6 +972,23 @@ image_contains_path() {
 
 verify_generated_partition_images() {
     local runtime_dtb_path="/spacemit/${PRIMARY_KERNEL_VERSION}/${BOARD_RUNTIME_DTB_NAME}.dtb"
+    local required_rootfs_paths=(
+        "/usr/share/wayland-sessions/lxqt-wayland.desktop"
+        "/usr/lib/systemd/system/NetworkManager.service"
+        "/usr/lib/systemd/system/sddm.service"
+        "/usr/sbin/NetworkManager"
+        "/usr/bin/sddm"
+        "/usr/bin/labwc"
+        "/usr/bin/growpart"
+        "/usr/sbin/sshd"
+        "/usr/local/bin/eaie-oled-status"
+        "/etc/systemd/system/eaie-oled-status.service"
+        "/etc/systemd/system/multi-user.target.wants/eaie-oled-status.service"
+        "/usr/bin/onnxruntime_perf_test"
+        "/usr/lib/python3.13/dist-packages/spacemit_ort/__init__.py"
+        "/usr/lib/python3.13/dist-packages/onnxruntime/__init__.py"
+    )
+    local required_rootfs_path
 
     log_info "Validating generated partition images"
 
@@ -911,6 +1007,10 @@ verify_generated_partition_images() {
         || die "Generated rootfs.ext4 is missing /etc/os-release"
     image_contains_path "rootfs.ext4" "/usr/lib/u-boot/spacemit/u-boot.itb" \
         || die "Generated rootfs.ext4 is missing /usr/lib/u-boot/spacemit/u-boot.itb"
+    for required_rootfs_path in "${required_rootfs_paths[@]}"; do
+        image_contains_path "rootfs.ext4" "$required_rootfs_path" \
+            || die "Generated rootfs.ext4 is missing $required_rootfs_path"
+    done
 
     log_ok "Generated bootfs.ext4 and rootfs.ext4 passed sanity validation"
 }
@@ -1034,12 +1134,7 @@ package_sdcard_image() {
 cleanup_rootfs_caches() {
     log_info "Cleaning apt cache inside the rootfs"
 
-    if [[ "$PARTIAL_BUILD" -eq 1 ]]; then
-        log_warn "Skipping apt cache cleanup so the first native boot can reuse downloaded packages"
-        return
-    fi
-
-    run_in_chroot "DEBIAN_FRONTEND=noninteractive apt-get clean"
+    run_apt_in_chroot "apt-get clean"
 }
 
 finalize_rootfs_for_packaging() {
@@ -1065,6 +1160,7 @@ main() {
     run_timed_phase "Enable SSH" configure_ssh
     run_timed_phase "Configure LXQt Wayland autologin" configure_sddm_autologin
     run_timed_phase "Install display-demo assets" install_display_demo_assets
+    run_timed_phase "Install OLED status service" install_oled_status_service
     run_timed_phase "Install first-boot repair service" install_firstboot_repair_service
     run_timed_phase "Install rootfs auto-expand service" install_rootfs_expand_service
     run_timed_phase "Generate initramfs images" generate_initramfs_images

@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="$ROOT_DIR/.bianbu-build"
+LOG_DIR="$STATE_DIR/logs"
 CONTAINER_STATE_FILE="$STATE_DIR/container-name"
 SOURCE_ARTIFACT_ENV_FILE="$STATE_DIR/source-artifacts.env"
 BUILD_CONF_FILE="$ROOT_DIR/build.conf"
@@ -72,6 +73,7 @@ KERNEL_SOURCE_DEB=""
 UBOOT_SOURCE_DEB=""
 BUILD_START_EPOCH=0
 CLEAN_BUILD=0
+BUILD_LOG_FILE=""
 declare -a PHASE_NAMES=()
 declare -a PHASE_SECONDS=()
 
@@ -116,6 +118,8 @@ Advanced KEY=VALUE overrides:
 Outputs:
    - bianbu-custom.sdcard
    - bianbu-custom.zip
+   - .bianbu-build/logs/build-YYYYmmdd-HHMMSS.log
+   - .bianbu-build/logs/latest.log
 
 Examples:
   bash scripts/build-bianbu.sh
@@ -246,6 +250,20 @@ print_timing_summary() {
         printf '  - %s: %s\n' "${PHASE_NAMES[$i]}" "$(format_duration "${PHASE_SECONDS[$i]}")"
     done
     printf '  - Total host build time: %s\n' "$(format_duration "$total_seconds")"
+}
+
+setup_build_logging() {
+    local stamp
+
+    mkdir -p "$LOG_DIR"
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    BUILD_LOG_FILE="$LOG_DIR/build-${stamp}.log"
+
+    ln -sfn "$(basename "$BUILD_LOG_FILE")" "$LOG_DIR/latest.log"
+    touch "$BUILD_LOG_FILE"
+
+    exec > >(tee -a "$BUILD_LOG_FILE") 2>&1
+    log_info "Writing full build log to $BUILD_LOG_FILE"
 }
 
 validate_modes() {
@@ -447,7 +465,12 @@ ensure_apt_packages() {
 
     log_warn "Installing missing host packages: ${missing[*]}"
     run_sudo apt-get update
-    run_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+    run_sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a UCF_FORCE_CONFFOLD=1 \
+        apt-get install -y \
+        -o Dpkg::Use-Pty=0 \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        "${missing[@]}"
 }
 
 install_host_prereqs() {
@@ -596,20 +619,41 @@ download_inputs() {
 }
 
 install_qemu_support() {
-    log_info "Refreshing the host qemu-user-static package"
-    run_sudo apt-get update
-    run_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-user-static
-    run_sudo systemctl restart systemd-binfmt.service
-
     local rvv_output
-    rvv_output="$("$ROOT_DIR/$RVV_FILE" 2>&1 || true)"
 
+    log_info "Checking host qemu-user-static support"
+    rvv_output="$("$ROOT_DIR/$RVV_FILE" 2>&1 || true)"
     if [[ "$rvv_output" == *"spacemit"* ]]; then
-        log_ok "Using host qemu-user-static: $(qemu-riscv64-static --version | head -n 1)"
+        log_ok "Using existing host qemu-user-static: $(qemu-riscv64-static --version | head -n 1)"
         return
     fi
 
-    log_warn "The host qemu-user-static did not pass the SpacemiT rvv check. Falling back to the pinned package."
+    log_warn "The current qemu-user-static registration did not pass the SpacemiT rvv check. Restarting binfmt."
+    run_sudo systemctl restart systemd-binfmt.service
+
+    rvv_output="$("$ROOT_DIR/$RVV_FILE" 2>&1 || true)"
+    if [[ "$rvv_output" == *"spacemit"* ]]; then
+        log_ok "Using refreshed host qemu-user-static: $(qemu-riscv64-static --version | head -n 1)"
+        return
+    fi
+
+    log_warn "The host qemu-user-static still did not pass the SpacemiT rvv check. Refreshing the host package."
+    run_sudo apt-get update
+    run_sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a UCF_FORCE_CONFFOLD=1 \
+        apt-get install -y \
+        -o Dpkg::Use-Pty=0 \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        qemu-user-static
+    run_sudo systemctl restart systemd-binfmt.service
+
+    rvv_output="$("$ROOT_DIR/$RVV_FILE" 2>&1 || true)"
+    if [[ "$rvv_output" == *"spacemit"* ]]; then
+        log_ok "Using refreshed host qemu-user-static package: $(qemu-riscv64-static --version | head -n 1)"
+        return
+    fi
+
+    log_warn "The host qemu-user-static package did not pass the SpacemiT rvv check. Falling back to the pinned package."
 
     if dpkg-query -W -f='${Status}' binfmt-support 2>/dev/null | grep -q "install ok installed"; then
         log_warn "Purging binfmt-support because it conflicts with the SpacemiT qemu-user-static package"
@@ -728,10 +772,11 @@ clean_workspace() {
         "$ROOT_DIR/bianbu-custom.zip" \
         "$ROOT_DIR/$BASE_ROOTFS_FILE" \
         "$ROOT_DIR/$QEMU_DEB_FILE" \
-        "$ROOT_DIR/$RVV_FILE" \
-        "$STATE_DIR"
+        "$ROOT_DIR/$RVV_FILE"
 
     run_sudo rm -rf \
+        "$CONTAINER_STATE_FILE" \
+        "$SOURCE_ARTIFACT_ENV_FILE" \
         "$ROOT_DIR/sources/kernel/"*.deb \
         "$ROOT_DIR/sources/u-boot/"*.deb
 
@@ -850,6 +895,7 @@ main() {
     mkdir -p "$STATE_DIR"
     load_build_config
     parse_args "$@"
+    setup_build_logging
     finalize_build_request
     validate_modes
     resolve_board_profile
@@ -895,6 +941,7 @@ main() {
     log_ok "Artifacts are ready:"
     printf '  %s\n' "$ROOT_DIR/bianbu-custom.sdcard"
     printf '  %s\n' "$ROOT_DIR/bianbu-custom.zip"
+    log_ok "Build log is available at $BUILD_LOG_FILE"
     print_timing_summary "$(( $(now_millis) - BUILD_START_EPOCH ))"
 }
 
