@@ -230,6 +230,76 @@ Source workflow side effects:
 - `FULL_CLEAN=yes` preserves `.bianbu-build/logs/` so failed rebuilds remain
   diagnosable
 
+## AI / NPU Runtime Stack
+
+The current supported SpacemiT K1 AI path is model-level inference through
+ONNX Runtime, not direct userspace control of a raw NPU device.
+
+The image build installs:
+
+- `onnxruntime`
+- `python3-spacemit-ort`
+
+The build also validates that Python can import `onnxruntime` and
+`spacemit_ort`, and that ONNX Runtime exposes:
+
+```text
+SpaceMITExecutionProvider
+```
+
+Conceptually, the stack is:
+
+```text
+application
+  -> ONNX Runtime API
+  -> SpaceMITExecutionProvider
+  -> SpacemiT runtime/library/backend
+  -> hardware acceleration path
+```
+
+For Python applications, the high-level pattern is:
+
+```python
+import onnxruntime
+import spacemit_ort
+
+session = onnxruntime.InferenceSession(
+    model_path,
+    providers=["SpaceMITExecutionProvider"],
+)
+```
+
+For C/C++ applications, use the ONNX Runtime C or C++ API and link against the
+SpacemiT ONNX Runtime provider libraries. The local SpacemiT demo tree contains
+reference examples under:
+
+```text
+/media/guilhermes/ssd/EAIE/ai_demos/spacemit-demo/examples/CV/
+```
+
+In those C++ examples, the relevant libraries are:
+
+```text
+onnxruntime
+spacemit_ep
+```
+
+Current local investigation did not find an EAIE board-profile DTS node or
+obvious K1-specific kernel driver that must be enabled just to use the public
+AI runtime path. Treat the NPU as a userspace runtime/provider integration
+unless future board-side evidence shows a kernel-visible accelerator device.
+
+Useful next checks on a live board, when investigating the lower layers:
+
+```bash
+python3 -c "import onnxruntime, spacemit_ort; print(onnxruntime.get_available_providers())"
+ls -l /dev/accel /dev/dri /dev 2>/dev/null | grep -iE 'npu|ai|accel|dri'
+dpkg -L onnxruntime python3-spacemit-ort | grep -E '\.so|spacemit'
+```
+
+To understand whether a model run opens a kernel device, run a small ONNX demo
+under `strace` and inspect `openat`, `ioctl`, and `mmap` calls.
+
 ## Board Profile Model
 
 The build system supports explicit board selection. The two important profiles
@@ -807,6 +877,25 @@ When those appear, check:
   <https://docs.banana-pi.org/en/BPI-F3/BananaPi_BPI-F3>
   This page includes the `GPIO Pin Define` section used as the primary header
   pinout reference for the stock BPI-F3 board.
+- Bianbu ONNX Runtime documentation:
+  <https://bianbu.spacemit.com/en/ai/onnxruntime>
+  This is the current public reference for using `SpaceMITExecutionProvider`
+  through ONNX Runtime on Bianbu.
+- ONNX Runtime execution-provider overview:
+  <https://onnxruntime.ai/docs/execution-providers>
+  Useful background for understanding how hardware backends are selected.
+
+## AI Agent Handoff
+
+Reusable agent instructions are kept under [ai-agents/](ai-agents/):
+
+- [ai-agents/DIRECTIVES.md](ai-agents/DIRECTIVES.md)
+  Persistent rules and the chat-migration routine.
+- [ai-agents/AGENT-HANDOFF-HELPER.md](ai-agents/AGENT-HANDOFF-HELPER.md)
+  Current handoff state for the next chat/agent.
+
+When starting a new chat, point the next agent to `ai-agents/DIRECTIVES.md`
+first, then to `ai-agents/AGENT-HANDOFF-HELPER.md`.
 
 ## TODO's
 
@@ -830,3 +919,9 @@ When those appear, check:
 - Once the custom kernel and rootfs workspaces are the primary development
   inputs, use `repo` to synchronize the required workspaces into the build
   container.
+- Build a minimal ONNX Runtime C/C++ NPU smoke test for
+  `SpaceMITExecutionProvider`, then compare behavior and timing against
+  `CPUExecutionProvider`.
+- Investigate the lower-level SpacemiT AI runtime path on-board with `strace`
+  and package inspection to determine whether model inference opens a kernel
+  device node or stays entirely inside userspace/runtime libraries.

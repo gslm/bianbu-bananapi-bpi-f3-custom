@@ -5,11 +5,21 @@ This document is the handoff for the next agent taking over the
 validated hardware facts, important repo conventions, known pitfalls, and the
 next intended task.
 
-The main developer-facing reference is [README.md](README.md). Read it first,
+The main developer-facing reference is [README.md](../README.md). Read it first,
 then use this file as the current-session handoff.
+
+This file now lives under `ai-agents/`. Persistent migration and operating
+rules live in [DIRECTIVES.md](DIRECTIVES.md). When opening this file from the
+repo root, remember that many paths below are repository-root paths even when
+the Markdown link is relative.
 
 ## Operating Rules For The Next Agent
 
+- Read [DIRECTIVES.md](DIRECTIVES.md) first when the user asks for a chat
+  migration or context-refresh routine.
+- Always refer to
+  `/media/guilhermes/ssd/EAIE/bianbu-bananapi-bpi-f3-custom/COMMIT-SCOPE.md`
+  before creating or suggesting commits.
 - Do not run build, flash, SSH deploy, or live board deployment commands unless
   the user explicitly asks you to run them.
 - Prefer generating commands for the user to run manually. Long-running
@@ -48,27 +58,27 @@ Important local paths:
 - repo root:
   `/media/guilhermes/ssd/EAIE/bianbu-bananapi-bpi-f3-custom`
 - main onboarding doc:
-  [README.md](README.md)
+  [README.md](../README.md)
 - build config:
-  [build.conf](build.conf)
+  [build.conf](../build.conf)
 - kernel tree:
-  [sources/kernel/linux-6.6](sources/kernel/linux-6.6)
+  [sources/kernel/linux-6.6](../sources/kernel/linux-6.6)
 - U-Boot tree:
-  [sources/u-boot/uboot-2022.10](sources/u-boot/uboot-2022.10)
+  [sources/u-boot/uboot-2022.10](../sources/u-boot/uboot-2022.10)
 - EAIE kernel DTS:
-  [sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_eaie-v1-riscv-spacemitk1.dts](sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_eaie-v1-riscv-spacemitk1.dts)
+  [sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_eaie-v1-riscv-spacemitk1.dts](../sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_eaie-v1-riscv-spacemitk1.dts)
 - shared BPI-F3 common DTSI:
-  [sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_deb1-common.dtsi](sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_deb1-common.dtsi)
+  [sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_deb1-common.dtsi](../sources/kernel/linux-6.6/arch/riscv/boot/dts/spacemit/k1-x_deb1-common.dtsi)
 - kernel defconfig:
-  [sources/kernel/linux-6.6/arch/riscv/configs/k1_defconfig](sources/kernel/linux-6.6/arch/riscv/configs/k1_defconfig)
+  [sources/kernel/linux-6.6/arch/riscv/configs/k1_defconfig](../sources/kernel/linux-6.6/arch/riscv/configs/k1_defconfig)
 - accelerometer demo (built in the previous session):
-  [demos/accelerometer/](demos/accelerometer/)
+  [demos/accelerometer/](../demos/accelerometer/)
 - commit scope rules:
-  [COMMIT-SCOPE.md](COMMIT-SCOPE.md)
+  [COMMIT-SCOPE.md](../COMMIT-SCOPE.md)
 
 ## Source Remotes And Build Defaults
 
-[build.conf](build.conf) currently selects the custom source remotes:
+[build.conf](../build.conf) currently selects the custom source remotes:
 
 ```text
 BOARD=eaie-v1-riscv-spacemitk1
@@ -98,37 +108,45 @@ Do not treat these as production credentials.
 
 ## Current Repo Dirty State At Handoff
 
-At the time this handoff was generated, root repo status showed:
+At the start of the current chat-migration update, root repo status showed:
 
 ```text
- M demos/accelerometer/PROVISION.md
- D demos/accelerometer/app.py
- M demos/accelerometer/provision.sh
-?? demos/accelerometer/app_accel.py
-?? demos/accelerometer/docs/
+ D AGENT-HANDOFF-HELPER.md
+?? ai-agents/AGENT-HANDOFF-HELPER.md
+?? ai-agents/DIRECTIVES.md
 ```
 
 What this means:
 
-- `app.py` → `app_accel.py` rename — done in working tree, not yet committed.
-- `provision.sh` and `PROVISION.md` modified — the desktop-shortcut step was
-  added late in the previous session.
-- `demos/accelerometer/docs/` is the new six-document learning reference set,
-  not yet committed.
-
-The user has not yet committed any of these. Generate commit commands for the
-user to run when they ask. The natural single commit covering all four
-changes would be something like:
-
-```text
-feat(kernel): Refine MPU6050 demo (rename, exit button, desktop shortcut, docs)
-```
-
-…or split per concern (rename / exit button / desktop shortcut / docs) if the
-user prefers fine-grained history.
+- the root-level `AGENT-HANDOFF-HELPER.md` was intentionally moved under
+  `ai-agents/`
+- `ai-agents/DIRECTIVES.md` is the new reusable chat-migration instruction file
+- this migration update is expected to leave `README.md`,
+  `ai-agents/AGENT-HANDOFF-HELPER.md`, and `ai-agents/DIRECTIVES.md` modified
+  or untracked until the user commits them
 
 The kernel and U-Boot trees may have local generated artifacts (`debian/`,
 build outputs). Do not delete or revert those without asking.
+
+## Latest Changes Since This Agent Assumed The Workspace
+
+No kernel, DTS, rootfs, flashing, or board-deploy changes were made by this
+agent before the migration-document update.
+
+Work performed in this chat:
+
+- confirmed the project scope is the Banana Pi BPI-F3 / EAIE Bianbu custom
+  image workspace
+- explored the SpacemiT K1 AI/NPU application stack
+- confirmed the image already installs and validates `onnxruntime` plus
+  `python3-spacemit-ort`
+- identified `SpaceMITExecutionProvider` as the supported application-facing
+  ONNX Runtime backend
+- found local Python and C++ reference examples under
+  `/media/guilhermes/ssd/EAIE/ai_demos/spacemit-demo/examples/CV/`
+- did not find an obvious EAIE board DTS node or K1-specific kernel driver that
+  must be enabled just to use the public AI runtime path
+- created/updated the reusable chat-migration docs in `ai-agents/`
 
 ## Recently Committed Work (Previous Session)
 
@@ -136,6 +154,9 @@ These commits landed during the previous session — useful context for the
 next agent:
 
 ```text
+f2393ce refactor(build-system): Refresh agent handoff for current state
+45fd65d feat(kernel): Add accelerometer demo learning reference docs
+742f35d feat(kernel): Polish accelerometer demo with rename, exit button, shortcut
 85950e2 feat(zt-secure-element): Track zero-trust workstream tasks
 aaac0c7 feat(daemon-control): Add EAIE OLED status display service
 6eddd74 fix(rootfs): Tolerate growpart NOCHANGE and stray lsblk whitespace
@@ -256,6 +277,69 @@ ttyUSB3
 ModemManager reported primary AT port `ttyUSB2`. SIM was missing during the
 test, which was expected. A small AT-command helper script was committed to
 `demos/ec25/`.
+
+### SpacemiT K1 AI / NPU Runtime
+
+The most recent technical discussion before this migration was about
+understanding the SpacemiT K1 NPU / AI acceleration path.
+
+Current understanding:
+
+- The public Bianbu application-facing API is ONNX Runtime through
+  `SpaceMITExecutionProvider`.
+- The image installs `onnxruntime` and `python3-spacemit-ort`.
+- [scripts/build-rootfs-in-container.sh](../scripts/build-rootfs-in-container.sh)
+  validates that Python can import `onnxruntime` and `spacemit_ort`, and that
+  `SpaceMITExecutionProvider` is listed by ONNX Runtime.
+- Local SpacemiT demo examples live under:
+
+```text
+/media/guilhermes/ssd/EAIE/ai_demos/spacemit-demo/examples/CV/
+```
+
+Python examples use:
+
+```python
+import onnxruntime
+import spacemit_ort
+
+session = onnxruntime.InferenceSession(
+    model_path,
+    providers=["SpaceMITExecutionProvider"],
+)
+```
+
+C++ examples include:
+
+```cpp
+#include <onnxruntime_cxx_api.h>
+#include "spacemit_ort_env.h"
+```
+
+and link against:
+
+```text
+onnxruntime
+spacemit_ep
+```
+
+No obvious EAIE DTS node or K1-specific kernel `npu` driver was found in the
+current kernel tree search that must be enabled before using this public AI
+runtime path. Treat acceleration as a userspace runtime/provider integration
+unless live-board investigation proves a kernel-visible accelerator device is
+opened.
+
+Useful live-board checks for the next agent to generate for the user:
+
+```bash
+python3 -c "import onnxruntime, spacemit_ort; print(onnxruntime.get_available_providers())"
+ls -l /dev/accel /dev/dri /dev 2>/dev/null | grep -iE 'npu|ai|accel|dri'
+dpkg -L onnxruntime python3-spacemit-ort | grep -E '\.so|spacemit'
+```
+
+To investigate lower layers, run a minimal ONNX model under `strace` and watch
+for `openat`, `ioctl`, and `mmap` calls to determine whether the provider opens
+a kernel device node or stays in userspace/runtime libraries.
 
 ### MPU6050 IMU
 
@@ -472,7 +556,7 @@ The sysfs polling path used by the demo opens 6 files per sample (3 accel +
 3 gyro) — comfortable up to ~100 Hz. For higher rates, switch to the IIO
 buffered chardev (`/dev/iio:device1`), which also requires a udev rule
 because the chardev is `root:root 0600`. This is documented as a future
-upgrade path in [demos/accelerometer/PROVISION.md](demos/accelerometer/PROVISION.md).
+upgrade path in [demos/accelerometer/PROVISION.md](../demos/accelerometer/PROVISION.md).
 
 ## Accelerometer Demo App
 
@@ -481,7 +565,7 @@ OpenGL ES 3 fullscreen 3D visualization of live MPU6050 data.**
 
 ### Location
 
-Source: [demos/accelerometer/](demos/accelerometer/)
+Source: [demos/accelerometer/](../demos/accelerometer/)
 
 Files:
 
@@ -577,13 +661,20 @@ line numbers.
 
 ## Current Intended Next Task
 
-The previous session **completed** what was originally tracked here as
-"create a simple application that reads MPU6050 data and displays it on
-the board's display screen." That task is now done — see "Accelerometer
-Demo App" above.
+The immediate current task is the chat-migration update itself:
 
-The user has not yet specified the next task. Wait for direction. Options
-they may want to pick from (and have hinted at):
+- keep [README.md](../README.md) current
+- keep this handoff current
+- keep [DIRECTIVES.md](DIRECTIVES.md) as the reusable migration routine
+- do not commit until the user reviews the resulting files
+
+The most recent technical direction before the migration was learning how the
+SpacemiT K1 NPU/AI stack works. If the user resumes that line of work, the next
+practical step is to build or run a minimal ONNX Runtime smoke test using
+`SpaceMITExecutionProvider`, compare it against `CPUExecutionProvider`, and
+optionally inspect it with `strace`.
+
+Other options the user may want to pick from (and has hinted at):
 
 1. **Visual polish on the demo**:
    - Arrowhead at the end of each gyro arc (direction indicator).
@@ -594,7 +685,7 @@ they may want to pick from (and have hinted at):
 2. **Performance / data path upgrade**:
    - Move the IMU read path from sysfs polling to the IIO buffered chardev,
      to reliably push past 50 Hz. Requires a udev rule (already documented
-     in [PROVISION.md](demos/accelerometer/PROVISION.md) as a future change).
+     in [PROVISION.md](../demos/accelerometer/PROVISION.md) as a future change).
 
 3. **Sensor fusion / orientation**:
    - Add a Madgwick or complementary filter to derive a stable orientation
@@ -799,7 +890,11 @@ this dev machine. Be cautious before suggesting repeated full flashes.
 
 ## Commit Guidance
 
-Follow [COMMIT-SCOPE.md](COMMIT-SCOPE.md).
+Follow [COMMIT-SCOPE.md](../COMMIT-SCOPE.md). The absolute path is:
+
+```text
+/media/guilhermes/ssd/EAIE/bianbu-bananapi-bpi-f3-custom/COMMIT-SCOPE.md
+```
 
 Listed types:
 
@@ -870,15 +965,16 @@ the relevant facts are also captured in this handoff.
 
 ## Immediate Next Agent Checklist
 
-1. Read [README.md](README.md).
-2. Read this handoff file fully — especially the "Userspace GUI Stack" and
-   "Accelerometer Demo App" sections.
-3. Skim [demos/accelerometer/docs/README.md](demos/accelerometer/docs/README.md)
+1. Read [DIRECTIVES.md](DIRECTIVES.md).
+2. Read [README.md](../README.md).
+3. Read this handoff file fully — especially the "Userspace GUI Stack" and
+   "Accelerometer Demo App" and "SpacemiT K1 AI / NPU Runtime" sections.
+4. Skim [demos/accelerometer/docs/README.md](../demos/accelerometer/docs/README.md)
    so you know what the user expects you to be familiar with re: the demo.
-4. Confirm the current board IP with the user before any SSH operation.
-5. Wait for the user's next-task instruction. Do not pre-emptively continue
+5. Confirm the current board IP with the user before any SSH operation.
+6. Wait for the user's next-task instruction. Do not pre-emptively continue
    the demo.
-6. When generating any non-trivial code change to `app_accel.py`, plan to
-   keep [04-APP-WALKTHROUGH.md](demos/accelerometer/docs/04-APP-WALKTHROUGH.md)
+7. When generating any non-trivial code change to `app_accel.py`, plan to
+   keep [04-APP-WALKTHROUGH.md](../demos/accelerometer/docs/04-APP-WALKTHROUGH.md)
    reasonably current.
-7. Do not run build/deploy/flash commands yourself unless explicitly asked.
+8. Do not run build/deploy/flash commands yourself unless explicitly asked.
